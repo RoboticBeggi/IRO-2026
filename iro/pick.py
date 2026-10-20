@@ -69,9 +69,10 @@ class Eye:
     def detect(self, want=None, near=None, save=True):
         """Best detection of the wanted class(es): (name, conf, (u, v) centre, box) or None.
         `near`: prefer the one closest to this pixel (tracking the same object)."""
-        found, img = self.det.detect(self.frame(), conf=self.cfg["min_conf"], draw=save)
+        found, img = self.det.detect(self.frame(), conf=self.cfg["min_conf"], draw=True)
         if save:
             cv2.imwrite(str(SNAP), img)
+        self.cap.flash(img, "pick: " + (", ".join(f"{n} {p:.2f}" for n, p, *_ in found[:3]) or "nothing seen"), 1.0)
         classes = [want] if want else self.classes()
         found = [(n, p, c, b) for n, p, c, b, _ in found if n in classes]
         if not found:
@@ -84,6 +85,7 @@ class Eye:
         """All detections (stock + taught), best first: [(name, conf, (u, v))]."""
         found, img = self.det.detect(self.frame(), conf=conf, draw=True)
         cv2.imwrite(str(SNAP), img)
+        self.cap.flash(img, ", ".join(f"{n} {p:.2f}" for n, p, *_ in found[:4]) or "nothing recognised", 1.0)
         return [(n, p, c) for n, p, c, _, _ in found]
 
     def grasp_pixel(self):

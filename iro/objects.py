@@ -31,28 +31,87 @@ STOCK_MODEL = ROOT / "models" / "yolo11n.pt"
 SHEET = OBJ_DIR / "{name}" / "check.jpg"
 
 
+class Camera:
+    """Wrist camera that keeps the browser feed (iro.stream) live in the background, even while
+    the program waits for Enter or the arm moves. `overlay(frame) -> (frame, text)` decorates it."""
+
+    def __init__(self):
+        import threading
+
+        from iro.stream import feed
+        dev = load_config()["devices"]["arm_camera"]["device"]
+        self.cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"cannot open the wrist camera {dev}: another program has it "
+                               "(iro vision / iro pick / iro object / iro up camera). Stop that one first.")
+        self.lock = threading.Lock()
+        self.feed = feed()
+        self.overlay = None
+        self.status = ""
+        self.hold_until = 0.0
+        self.running = True
+        threading.Thread(target=self._preview, daemon=True).start()
+
+    def _preview(self):
+        while self.running:
+            with self.lock:
+                ok, f = self.cap.read()
+            if not ok:
+                time.sleep(0.05)
+                continue
+            text = self.status
+            if self.overlay:
+                try:
+                    f, extra = self.overlay(f)
+                    text = " | ".join(t for t in (self.status, extra) if t)
+                except Exception:  # noqa: BLE001 - a drawing problem must not stop the feed
+                    pass
+            if time.time() >= self.hold_until:
+                self.feed.show(f, text)
+            if not self.overlay:
+                time.sleep(0.03)   # plain preview: ~30 fps is plenty; with YOLO the detector sets the pace
+
+    def flash(self, img, text, seconds=0.6):
+        """Show a still (e.g. a just-labelled picture) for a moment before the live view resumes."""
+        self.feed.show(img, text)
+        self.hold_until = time.time() + seconds
+
+    def read(self):
+        with self.lock:
+            return self.cap.read()
+
+    def release(self):
+        self.running = False
+        time.sleep(0.1)
+        with self.lock:
+            self.cap.release()
+
+
 def open_camera():
-    dev = load_config()["devices"]["arm_camera"]["device"]
-    cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    if not cap.isOpened():
-        raise RuntimeError(f"cannot open the wrist camera {dev} (is `iro vision` or `iro up camera` using it?)")
-    return cap
+    return Camera()
 
 
-def grab(cap, n=1):
+def grab(cam, n=1):
     """Fresh frame(s): drop the ones buffered while the arm moved; median of n reduces noise."""
-    for _ in range(4):
-        cap.grab()
-    frames = []
-    for _ in range(n):
-        ok, f = cap.read()
-        if ok:
-            frames.append(f)
+    with cam.lock:
+        for _ in range(4):
+            cam.cap.grab()
+        frames = [f for ok, f in (cam.cap.read() for _ in range(n)) if ok]
     if not frames:
         raise RuntimeError("wrist camera gives no image")
     return np.median(np.stack(frames), axis=0).astype(np.uint8) if n > 1 else frames[0]
+
+
+def draw_box(img, box, color=(0, 200, 255), label=None):
+    img = img.copy()
+    if box is not None:
+        x1, y1, x2, y2 = map(int, box)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
+        if label:
+            cv2.putText(img, label, (x1, max(16, y1 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    return img
 
 
 class Detector:
@@ -160,14 +219,17 @@ def cmd_add(name, rounds):
     (d / "background").mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     cap = open_camera()
+    cap.status = f"teaching {name}: moving to the work area"
     kept = 0
     with Arm() as arm:
         poses = capture_poses(arm, cfg)
         print(f"{len(poses)} camera poses. Moving to the work area...")
         look_at(arm, cfg, cfg["look_xy"])
+        cap.status = "STEP 1: clear the work area, then press Enter"
         input("\n1. CLEAR the work area under the camera (nothing there, hands away). Enter. ")
         bgs = []
         for i, xyz in enumerate(poses):
+            cap.status = f"recording the empty table {i + 1}/{len(poses)}"
             arm.move_tip(xyz, tilt=np.radians(cfg["look_tilt_deg"]))
             time.sleep(0.4)
             bg = grab(cap, n=3)
@@ -180,6 +242,7 @@ def cmd_add(name, rounds):
             arm.move_tip(poses[i], tilt=np.radians(cfg["look_tilt_deg"]))
             time.sleep(0.4)
             if object_box(grab(cap, n=3), bgs[i]) is not None:
+                cap.status = "STOPPED: empty table changed (light or arm) - see terminal"
                 print("STOPPED: the empty table no longer matches its picture at the same pose. Either the light "
                       "changed (shadows, a moving person, sunlight) or the arm does not return to exactly the same "
                       "pose. Steady the light and try again.")
@@ -188,6 +251,14 @@ def cmd_add(name, rounds):
         print("   empty table recorded; poses repeat exactly.")
         centre = int(np.argmin([np.linalg.norm(np.subtract(p, [*cfg["look_xy"], cfg["look_z"]])) for p in poses]))
         arm.move_tip(poses[centre], tilt=np.radians(cfg["look_tilt_deg"]))
+
+        def placement(f):   # live: box around whatever differs from the empty table
+            box = object_box(f, bgs[centre])
+            hint = where_hint(box, f.shape)
+            return draw_box(f, box, (0, 255, 0) if box is not None and not hint else (0, 0, 255)), \
+                ("ok, press Enter" if box is not None and not hint else hint.split(":")[0])
+        cap.overlay = placement
+        cap.status = f"STEP 2: put the {name} in view (green box = good)"
         while True:
             input(f"\n2. Put the {name} in the middle of the work area, under the camera. Hands away. Enter. ")
             time.sleep(0.4)
@@ -197,18 +268,23 @@ def cmd_add(name, rounds):
                 print("   I can see it.")
                 break
             print("   " + hint)
+        cap.overlay = None
         for r in range(rounds):
             if r:
+                cap.status = f"round {r + 1}/{rounds}: turn the {name} a quarter turn, then Enter"
                 input(f"\n   Round {r + 1}/{rounds}: turn the {name} a quarter turn (or onto another side), "
                       "same spot, hands away. Enter. ")
             got = 0
             for i, xyz in enumerate(poses):
                 arm.move_tip(xyz, tilt=np.radians(cfg["look_tilt_deg"]))
                 time.sleep(0.4)
+                cap.status = f"round {r + 1}/{rounds}, picture {i + 1}/{len(poses)}"
                 f = grab(cap)
                 box = object_box(f, bgs[i])
                 if box is None or where_hint(box, f.shape):
+                    cap.flash(draw_box(f, box, (0, 0, 255)), f"round {r + 1} picture {i + 1}: skipped (no clean box)")
                     continue
+                cap.flash(draw_box(f, box, (0, 200, 255), name), f"round {r + 1} picture {i + 1}: labelled")
                 stem = f"{stamp}_r{r}_p{i:02d}"
                 cv2.imwrite(str(d / "images" / f"{stem}.jpg"), f)
                 h, w = f.shape[:2]
