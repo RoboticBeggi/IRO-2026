@@ -78,15 +78,26 @@ class Camera:
         self.feed.show(img, text)
         self.hold_until = time.time() + seconds
 
-    def lock_exposure(self):
-        """Fix exposure at its current value: auto-exposure re-adjusts when someone moves nearby,
-        which changes the whole picture and spoils the empty-table comparison."""
+    def lock_exposure(self, target=120):
+        """Fix the exposure: auto-exposure re-adjusts when someone moves nearby, which changes the
+        whole picture and spoils the empty-table comparison. First steer it so the picture
+        averages `target` (mid-grey): a white object on a washed-out table has no contrast."""
         with self.lock:
-            exp = self.cap.get(cv2.CAP_PROP_EXPOSURE)
+            exp = max(self.cap.get(cv2.CAP_PROP_EXPOSURE), 1.0)
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)   # V4L2: 1 = manual, 3 = auto
-            self.cap.set(cv2.CAP_PROP_EXPOSURE, exp)
             self.exposure_locked = self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) == 1
-        return self.exposure_locked
+        if not self.exposure_locked:
+            return False
+        for _ in range(5):
+            with self.lock:
+                self.cap.set(cv2.CAP_PROP_EXPOSURE, exp)
+            time.sleep(0.3)
+            mean = float(grab(self).mean())
+            if abs(mean - target) < 12:
+                break
+            exp = float(np.clip(exp * target / max(mean, 1.0), 1, 5000))
+        self.exposure_value = exp
+        return True
 
     def read(self):
         with self.lock:
@@ -174,17 +185,18 @@ def capture_poses(arm, cfg):
     breaks the empty-table comparison. Replaying the same angles repeats to < 0.5 pixel."""
     from iro.motion import SEEDS
     lx, ly = cfg["look_xy"]
-    tilt = np.radians(cfg["look_tilt_deg"])
     roll = arm.level_roll()
     poses = []
     for dz in (0.0, 0.02):
         for dx in (-0.03, 0.0, 0.03):
             for dy in (-0.04, 0.0, 0.04):
                 xyz = [lx + dx, ly + dy, cfg["look_z"] + dz]
-                q, err = min((arm.kin.ik_down(xyz, np.r_[np.asarray(s)[:4], roll], tilt=tilt) for s in SEEDS),
-                             key=lambda r: r[1])
-                if err < 0.004:
-                    poses.append((xyz, q))
+                for tilt_deg in (cfg["look_tilt_deg"], cfg["look_tilt_deg"] - 10, cfg["look_tilt_deg"] - 20):
+                    q, err = min((arm.kin.ik_down(xyz, np.r_[np.asarray(s)[:4], roll], tilt=np.radians(tilt_deg))
+                                  for s in SEEDS), key=lambda r: r[1])
+                    if err < 0.004:
+                        poses.append((xyz, q))
+                        break
     return poses
 
 
@@ -216,11 +228,20 @@ def object_box(frame, background, min_frac=0.002, max_frac=0.4):
     return x, y, x + bw, y + bh
 
 
-def where_hint(box, shape):
+def where_hint(box, shape, centred=False):
+    """'' if the box is usable; otherwise what to do. centred=True (placing the object) also asks
+    for it near the middle of the picture, so it stays in view when the arm shifts between poses."""
     if box is None:
         return "I cannot see it: put it nearer the middle of the work area, under the camera."
     h, w = shape[:2]
     x1, y1, x2, y2 = box
+    if centred:
+        cx, cy = (x1 + x2) / 2 / w - 0.5, (y1 + y2) / 2 / h - 0.5
+        off = [side for side, on in (("right", cx > 0.2), ("left", cx < -0.2),
+                                     ("bottom", cy > 0.2), ("top", cy < -0.2)) if on]
+        if off:
+            return (f"Too far to the {' and '.join(off)} of the picture: move it toward the middle "
+                    "(watch the live feed).")
     edge = []
     if x1 < 5: edge.append("left")             # noqa: E701
     if x2 > w - 5: edge.append("right")        # noqa: E701
@@ -278,7 +299,7 @@ def cmd_add(name, rounds):
 
         def placement(f):   # live: box around whatever differs from the empty table
             box = object_box(f, bgs[centre])
-            hint = where_hint(box, f.shape)
+            hint = where_hint(box, f.shape, centred=True)
             return draw_box(f, box, (0, 255, 0) if box is not None and not hint else (0, 0, 255)), \
                 ("ok, press Enter" if box is not None and not hint else hint.split(":")[0])
         cap.overlay = placement
@@ -287,7 +308,7 @@ def cmd_add(name, rounds):
             input(f"\n2. Put the {name} in the middle of the work area, under the camera. Hands away. Enter. ")
             time.sleep(0.4)
             box = object_box(grab(cap, n=3), bgs[centre])
-            hint = where_hint(box, bgs[centre].shape)
+            hint = where_hint(box, bgs[centre].shape, centred=True)
             if not hint:
                 print("   I can see it.")
                 break

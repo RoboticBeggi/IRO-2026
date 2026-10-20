@@ -40,18 +40,18 @@ mounts:
 # Autonomous pick-up with the wrist camera + YOLO (`iro pick`). Metres, in base_link
 # (origin = bottom of the arm's base; z up).
 pick:
-  mount_height: 0.04          # arm base sits ~4 cm above the table (measured by hand, 20 Oct)
-  table_z: -0.04              # = -mount_height until `iro pick teach` measures it
+  mount_height: 0.13          # table is ~13 cm below the arm base (table touches, 20 Oct)
+  table_z: -0.13              # default; `iro arm zero` / `iro pick teach` measure it (pick_taught.yaml)
   clearance: 0.01             # the tip never goes lower than table_z + clearance
   max_joint_speed: 0.8        # rad/s
-  # Look pose: tip at look_xy, height look_z, gripper leaning look_tilt_deg outward.
-  # Straight down only reaches up to about 8 cm (wrist limit 95 deg); leaning out
-  # 25 deg reaches 12 cm at 15-25 cm in front of the base.
+  # Look pose: tip above look_xy, look_height above the TABLE, gripper leaning look_tilt_deg
+  # outward (0 = straight down; the SO-101 can point straight down up to ~8 cm above its base).
+  # The table is ~13 cm below the arm base, so 15 cm above the table is still straight-down.
   look_xy: [0.20, 0.0]
-  look_z: 0.12
-  look_tilt_deg: -25
-  grasp_z: 0.02               # tip height when closing on an object
-  lift_z: 0.08                # highest straight-down pose the arm reaches
+  look_height: 0.15
+  look_tilt_deg: 0
+  grasp_height: 0.025         # tip height above the table when closing (`iro pick teach` sets grasp_z exactly)
+  lift_height: 0.10           # lift objects this far above the table
   gripper_open_pct: 70        # % of the calibrated gripper range
   gripper_closed_pct: 0
   model: yolo11n.pt           # in models/

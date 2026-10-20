@@ -44,6 +44,10 @@ def pick_config() -> dict:
     cfg = load_config()["pick"]
     if TAUGHT.exists():
         cfg.update(yaml.safe_load(TAUGHT.read_text()) or {})
+    # Heights are set relative to the table (measured by `iro arm zero` / `iro pick teach`)
+    cfg["look_z"] = cfg["table_z"] + cfg["look_height"]
+    cfg["lift_z"] = cfg["table_z"] + cfg["lift_height"]
+    cfg.setdefault("grasp_z", cfg["table_z"] + cfg["grasp_height"])   # taught grasp_z wins
     return cfg
 
 
@@ -119,7 +123,7 @@ def do_pick(args, cfg):
     eye = Eye(cfg)
     with Arm(dry_run=args.dry_run) as arm:
         look = np.array(cfg["look_xy"], float)
-        print(f"1. look pose above {look}, {cfg['look_z']} m up")
+        print(f"1. look pose above {look}, {cfg['look_height'] * 100:.0f} cm above the table")
         arm.gripper(open=True)
         look_at(arm, cfg, look)
         d = eye.detect(args.object)
