@@ -1,0 +1,1 @@
+- [Jetson hardware state](jetson-hardware-state.md) — devices/software actually on the Orin Nano; ROS 2 not yet installed

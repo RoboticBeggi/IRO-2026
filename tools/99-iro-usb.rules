@@ -1,0 +1,10 @@
+# Stable device names for the IRO robot, so ports never swap between boots.
+# Installed by tools/bootstrap.sh to /etc/udev/rules.d/
+# Matched by serial number; if a board is replaced, update the serial
+# (udevadm info -a /dev/ttyACM0 | grep serial).
+
+# SO-ARM101 follower: Feetech bus servo board (CH343)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{serial}=="5B91044420", SYMLINK+="so101", MODE="0666"
+
+# RPLidar (CP2102N)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="14ec6ba74d73ed118dbf62eefdf7b791", SYMLINK+="rplidar", MODE="0666"

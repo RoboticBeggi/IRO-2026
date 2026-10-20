@@ -1,0 +1,3 @@
+# Installed from PyPI after requirements-torch.txt.
+# Exact versions of everything are in requirements-lock.txt (written by tools/backup.sh).
+lerobot[feetech]==0.4.4

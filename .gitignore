@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# ROS 2 build output (rebuilt by colcon)
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Big files: too large for GitHub (100 MB limit). Keep them on the USB backup
+# drive or the Hugging Face Hub, never only on the Jetson. See RECOVERY.md.
+models/
+datasets/
+*.gguf
+*.onnx
+*.engine
+*.pt
+*.pth
+*.safetensors
+*.bag
+*.mcap
+*.mp4
