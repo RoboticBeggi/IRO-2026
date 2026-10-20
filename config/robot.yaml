@@ -36,9 +36,10 @@ mounts:
   depth_camera: {xyz: [0.10, 0.0, 0.05], rpy: [0, 0, 0]}
 
 # Autonomous pick-up with the wrist camera + YOLO (`iro pick`). Metres, in base_link
-# (origin under the arm's base; z up). Arm standing on the table => table_z about 0.
+# (origin = bottom of the arm's base; z up).
 pick:
-  table_z: 0.0
+  mount_height: 0.04          # arm base sits ~4 cm above the table (measured by hand, 20 Oct)
+  table_z: -0.04              # = -mount_height until `iro pick teach` measures it
   clearance: 0.01             # the tip never goes lower than table_z + clearance
   max_joint_speed: 0.8        # rad/s
   # Look pose: tip at look_xy, height look_z, gripper leaning look_tilt_deg outward.
