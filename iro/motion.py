@@ -98,7 +98,9 @@ class Arm:
                 raise MotionError(f"{j} target {np.degrees(a):.0f} deg is outside its safe range")
 
     def _check_path(self, q0, q1, steps=20):
-        floor = self.pick["table_z"] + self.pick["clearance"]
+        # Never below the floor, but a move that starts lower (e.g. after a hand-guided
+        # pose during teach) may still go up: it just must not go lower than its start.
+        floor = min(self.pick["table_z"] + self.pick["clearance"], self.kin.fk(q0)[2, 3] - 0.002)
         for s in np.linspace(0, 1, steps):
             z = self.kin.fk(q0 + s * (q1 - q0))[2, 3]
             if z < floor:

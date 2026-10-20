@@ -188,9 +188,16 @@ def do_teach(args, cfg):
         print(f"   table_z = {taught['table_z']}")
         input("Now open the jaws by hand around an object standing on the table, at a good grasp "
               "height, gripper pointing straight down. Press Enter when it is in place. ")
-        tip = arm.tip()
+        T = arm.kin.fk(arm.joints())
+        tip = T[:3, 3]
         taught["grasp_z"] = round(float(tip[2]), 4)
         arm.hold()
+        if taught["grasp_z"] <= taught["table_z"] or T[2, 2] > -0.9:
+            print(f"   The numbers do not fit: grasp at {taught['grasp_z']} m vs table at {taught['table_z']} m, "
+                  f"gripper axis {T[:3, 2].round(2)} (straight down is [0, 0, -1]).")
+            print("   Either a joint counts the wrong way (run `iro arm check`), or the gripper was not pointing "
+                  "straight down. Nothing saved.")
+            return 1
         print(f"   grasp_z = {taught['grasp_z']}. Holding. Opening and rising to the look pose above it...")
         arm.pick["table_z"] = taught["table_z"]
         arm.gripper(open=True)
