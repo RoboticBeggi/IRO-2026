@@ -39,6 +39,7 @@ ARM (SO-ARM101)
 
 VISION
   iro vision              live wrist camera + YOLO boxes in the browser (http://localhost:8080)
+  iro object show NAME    INSTANT: show an object ~15 s and name it; recognised at once
   iro object add NAME     teach a new object: the arm films it from many angles, labels itself
   iro object train        train YOLO on all taught objects (10-20 min)
   iro object list         taught objects

@@ -3,7 +3,8 @@
     iro vision            then open http://localhost:8080 on the Jetson,
                           or http://<jetson-ip>:8080 from a laptop on the same network
 
-Green boxes: stock YOLO classes. Orange: objects you taught (`iro object add`).
+Green: stock YOLO classes. Orange: trained objects (`iro object train`). Pink: remembered
+objects (`iro object show`, instant).
 `iro object add` and `iro pick` show their own view on the same page while they run.
 """
 

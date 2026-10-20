@@ -1,5 +1,6 @@
 """Teach the robot your own objects: the arm films them, labels them, trains YOLO.
 
+    iro object show wayang     INSTANT: show it to the camera ~15 s, usable at once (no training)
     iro object add wayang      record a new object called "wayang" (arm does the angles)
     iro object list            taught objects and how many pictures each has
     iro object train           train YOLO on all taught objects (~10-20 min on the Jetson)
@@ -147,16 +148,22 @@ class Detector:
         self.models = [("stock", YOLO(str(STOCK_MODEL)))]
         if OBJ_MODEL.exists():
             self.models.append(("taught", YOLO(str(OBJ_MODEL))))
+        # Instant recognition (iro object show): no training, works as soon as something is remembered
+        from iro.instant import MEM, Recognizer
+        self.instant = Recognizer() if any(p for p in MEM.glob("*.npy") if not p.stem.startswith("_")) else None
 
     def describe(self):
         out = ["stock YOLO (80 classes)"]
         if len(self.models) > 1:
-            out.append("taught: " + ", ".join(self.models[1][1].names.values()))
+            out.append("trained: " + ", ".join(self.models[1][1].names.values()))
+        if self.instant:
+            out.append("remembered: " + ", ".join(self.instant.memory.objects))
         return out
 
     @property
     def taught_names(self):
-        return list(self.models[1][1].names.values()) if len(self.models) > 1 else []
+        names = list(self.models[1][1].names.values()) if len(self.models) > 1 else []
+        return names + (list(self.instant.memory.objects) if self.instant else [])
 
     def detect(self, frame, conf=None, draw=False):
         """[(name, conf, (u, v) centre, box xyxy, source)], best first; plus an annotated copy if draw."""
@@ -165,12 +172,15 @@ class Detector:
             r = m.predict(frame, device=0, verbose=False, conf=conf or self.conf)[0]
             for b, c, p in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.cls, r.boxes.conf):
                 found.append((r.names[int(c)], float(p), np.array([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]), b, source))
+        if self.instant:
+            for name, margin, c, b in self.instant.recognize(frame):
+                found.append((name, min(1.0, 0.5 + margin), c, b, "instant"))   # margin > -0.1 => score > 0.4
         found.sort(key=lambda d: -d[1])
         if not draw:
             return found, None
         img = frame.copy()
         for name, p, _, b, source in found:
-            color = (0, 200, 255) if source == "taught" else (0, 255, 0)
+            color = {"taught": (0, 200, 255), "instant": (255, 0, 255)}.get(source, (0, 255, 0))
             x1, y1, x2, y2 = map(int, b)
             cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
             cv2.putText(img, f"{name} {p:.2f}", (x1, max(14, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
@@ -603,6 +613,10 @@ def main():
     if not a or a[0] in ("-h", "--help", "help"):
         print(__doc__)
         return 0
+    if a[0] in ("show", "forget", "memory"):
+        from iro.instant import main as instant_main
+        sys.argv = [sys.argv[0]] + a
+        return instant_main()
     if a[0] == "add" and len(a) >= 2:
         rounds = int(a[a.index("--rounds") + 1]) if "--rounds" in a else 4
         return cmd_add(a[1], rounds)
