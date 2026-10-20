@@ -5,7 +5,7 @@ import subprocess
 
 from iro.hw import rplidar, system
 
-from .core import FAIL, INFO, OK, SKIP, WARN, Result, check
+from .core import FAIL, INFO, OK, WARN, Result, check
 
 G = "devices"
 

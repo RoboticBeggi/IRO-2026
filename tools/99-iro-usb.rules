@@ -6,5 +6,13 @@
 # SO-ARM101 follower: Feetech bus servo board (CH343)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{serial}=="5B91044420", SYMLINK+="so101", MODE="0666"
 
-# RPLidar (CP2102N)
+# RPLidar S2 (CP2102N)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="14ec6ba74d73ed118dbf62eefdf7b791", SYMLINK+="rplidar", MODE="0666"
+
+# OAK-D depth camera (Luxonis): needed by depthai and the ROS driver without root
+SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"
+
+# reSpeaker XVF3800 mic array: USB control access (direction of arrival, settings)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="001a", MODE="0666"
+
+# TETRIX PRIZM: add a SYMLINK+="prizm" line here once `iro prizm find` has identified it

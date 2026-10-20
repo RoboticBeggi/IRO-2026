@@ -8,6 +8,9 @@ devices:
     servo_ids: {shoulder_pan: 1, shoulder_lift: 2, elbow_flex: 3, wrist_flex: 4, wrist_roll: 5, gripper: 6}
     # Joints allowed a full 0-4095 calibration range (they turn all the way round)
     continuous_joints: [wrist_roll]
+    # +1 or -1 per joint so RViz turns the same way as the real arm.
+    # Check with `iro mirror`: move each joint by hand, flip the sign if RViz goes the other way.
+    joint_signs: {shoulder_pan: 1, shoulder_lift: 1, elbow_flex: 1, wrist_flex: 1, wrist_roll: 1, gripper: 1}
   lidar:
     port: /dev/rplidar
     usb: "10c4:ea60"
@@ -24,6 +27,12 @@ devices:
     # TETRIX PRIZM (Arduino-based). Not yet seen on USB; fill in once plugged in.
     port: /dev/prizm
     usb: null
+
+# Where each sensor sits relative to the arm base (base_link), metres and radians.
+# PLACEHOLDERS: measure on the real robot once the body is built.
+mounts:
+  lidar: {xyz: [0.0, 0.0, 0.10], rpy: [0, 0, 0]}
+  depth_camera: {xyz: [0.10, 0.0, 0.05], rpy: [0, 0, 0]}
 
 limits:
   jetson:

@@ -1,0 +1,164 @@
+{
+ "usb": [
+  {
+   "path": "1-2",
+   "idVendor": "0bda",
+   "idProduct": "5489",
+   "bcdDevice": "0140",
+   "manufacturer": "Generic",
+   "product": "4-Port USB 2.0 Hub",
+   "speed": "480"
+  },
+  {
+   "path": "1-2.1",
+   "idVendor": "046d",
+   "idProduct": "c52b",
+   "bcdDevice": "2411",
+   "manufacturer": "Logitech",
+   "product": "USB Receiver",
+   "speed": "12"
+  },
+  {
+   "path": "1-2.2",
+   "idVendor": "2e8a",
+   "idProduct": "000d",
+   "bcdDevice": "5000",
+   "manufacturer": "Raspberry Pi",
+   "product": "USB3 HUB",
+   "serial": "000TESTING",
+   "speed": "480"
+  },
+  {
+   "path": "1-2.2.3",
+   "idVendor": "32e6",
+   "idProduct": "9251",
+   "bcdDevice": "0000",
+   "manufacturer": "openaicam",
+   "product": "openaicam",
+   "serial": "5423534724",
+   "speed": "480"
+  },
+  {
+   "path": "1-2.3",
+   "idVendor": "2e8a",
+   "idProduct": "000d",
+   "bcdDevice": "5000",
+   "manufacturer": "Raspberry Pi",
+   "product": "USB3 HUB",
+   "serial": "000TESTING",
+   "speed": "480"
+  },
+  {
+   "path": "1-2.3.1",
+   "idVendor": "1a86",
+   "idProduct": "55d3",
+   "bcdDevice": "0445",
+   "product": "USB Single Serial",
+   "serial": "5B91044420",
+   "speed": "12"
+  },
+  {
+   "path": "1-2.3.2",
+   "idVendor": "03e7",
+   "idProduct": "2485",
+   "bcdDevice": "0001",
+   "manufacturer": "Movidius Ltd.",
+   "product": "Movidius MyriadX",
+   "serial": "03e72485",
+   "speed": "480"
+  },
+  {
+   "path": "1-2.3.3",
+   "idVendor": "2886",
+   "idProduct": "001a",
+   "bcdDevice": "0206",
+   "manufacturer": "Seeed Studio",
+   "product": "reSpeaker XVF3800 4-Mic Array",
+   "serial": "114993701254500104",
+   "speed": "480"
+  },
+  {
+   "path": "1-2.3.4",
+   "idVendor": "10c4",
+   "idProduct": "ea60",
+   "bcdDevice": "0100",
+   "manufacturer": "Silicon Labs",
+   "product": "CP2102N USB to UART Bridge Controller",
+   "serial": "14ec6ba74d73ed118dbf62eefdf7b791",
+   "speed": "12"
+  },
+  {
+   "path": "1-3",
+   "idVendor": "13d3",
+   "idProduct": "3549",
+   "bcdDevice": "0000",
+   "manufacturer": "Realtek",
+   "product": "Bluetooth Radio",
+   "serial": "00e04c000001",
+   "speed": "12"
+  },
+  {
+   "path": "2-1",
+   "idVendor": "0bda",
+   "idProduct": "0489",
+   "bcdDevice": "0140",
+   "manufacturer": "Generic",
+   "product": "4-Port USB 3.0 Hub",
+   "speed": "10000"
+  },
+  {
+   "path": "2-1.2",
+   "idVendor": "2e8a",
+   "idProduct": "000e",
+   "bcdDevice": "5000",
+   "manufacturer": "Raspberry Pi",
+   "product": "USB3 HUB",
+   "serial": "000TESTING",
+   "speed": "5000"
+  },
+  {
+   "path": "2-1.3",
+   "idVendor": "2e8a",
+   "idProduct": "000e",
+   "bcdDevice": "5000",
+   "manufacturer": "Raspberry Pi",
+   "product": "USB3 HUB",
+   "serial": "000TESTING",
+   "speed": "5000"
+  },
+  {
+   "path": "usb1",
+   "idVendor": "1d6b",
+   "idProduct": "0002",
+   "bcdDevice": "0515",
+   "manufacturer": "Linux 5.15.185-tegra xhci-hcd",
+   "product": "xHCI Host Controller",
+   "serial": "3610000.usb",
+   "speed": "480"
+  },
+  {
+   "path": "usb2",
+   "idVendor": "1d6b",
+   "idProduct": "0003",
+   "bcdDevice": "0515",
+   "manufacturer": "Linux 5.15.185-tegra xhci-hcd",
+   "product": "xHCI Host Controller",
+   "serial": "3610000.usb",
+   "speed": "10000"
+  }
+ ],
+ "serial_ports": [
+  {
+   "device": "/dev/ttyUSB0",
+   "vid_pid": "10c4:ea60",
+   "serial": "14ec6ba74d73ed118dbf62eefdf7b791",
+   "product": "CP2102N USB to UART Bridge Controller"
+  },
+  {
+   "device": "/dev/ttyACM0",
+   "vid_pid": "1a86:55d3",
+   "serial": "5B91044420",
+   "product": "USB Single Serial"
+  }
+ ]
+}

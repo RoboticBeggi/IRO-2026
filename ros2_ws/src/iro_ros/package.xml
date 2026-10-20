@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>iro_ros</name>
+  <version>0.1.0</version>
+  <description>IRO 2026 robot nodes: SO-ARM101 arm and the robot doctor.</description>
+  <maintainer email="udins22@gmail.com">Nordin</maintainer>
+  <license>Apache-2.0</license>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -19,9 +19,12 @@ replaced; it needs one servo connected at a time.
 ## Every session
 
 ```bash
-source ~/iro-2026/env.sh          # venv, $SO101_PORT, $SO101_ID, calibration folder
-python arm/scan_motors.py         # read-only: all 6 IDs answer, temps, voltages
+iro arm scan          # read-only: all 6 IDs answer, temps, voltages
+iro doctor arm        # plus calibration sanity and servo error flags
+iro mirror            # RViz model follows the real arm
 ```
+
+Servos are the **12 V STS3215** version (they read about 11.6 V).
 
 ## Calibrate
 
@@ -29,8 +32,7 @@ Needed once after assembly, and again whenever the arm is rebuilt (so on
 competition day too: practise it and time it).
 
 ```bash
-source ~/iro-2026/env.sh
-lerobot-calibrate --robot.type=so101_follower --robot.port=$SO101_PORT --robot.id=$SO101_ID
+iro arm calibrate     # runs lerobot-calibrate, then checks the result and backs it up
 ```
 
 1. Torque turns off. Move every joint by hand to the **middle of its range**
@@ -41,12 +43,10 @@ lerobot-calibrate --robot.type=so101_follower --robot.port=$SO101_PORT --robot.i
    time. Wrist roll is skipped (it turns all the way round). Press Enter when done.
 3. It saves to `arm/calibration/robots/so_follower/iro_follower.json`.
 
-Then back it up right away:
-
-```bash
-tools/backup.sh
-git add arm/calibration && git commit -m "Calibrate SO-101 follower"
-```
+`iro doctor arm` must then show no "no joint limits recorded" failure. A joint
+with range 0-4095 (other than wrist_roll) was not moved end to end, or its
+reading wrapped past the end because the middle pose was off; recalibrate.
+The 20 Oct calibration has this problem on elbow_flex and wrist_flex.
 
 The JSON and the servos' homing offsets must match. If you restore an old JSON
 onto servos that were recalibrated since, LeRobot asks to recalibrate: press

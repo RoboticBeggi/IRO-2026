@@ -5,7 +5,6 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 set +u; . "$ROOT/env.sh" >/dev/null; set -u
-export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 ROS_SETUP=/opt/ros/humble/setup.bash
 WS_SETUP="$ROOT/ros2_ws/install/setup.bash"
 

@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>iro_bringup</name>
+  <version>0.1.0</version>
+  <description>IRO 2026 robot: launch files, robot model (URDF) and RViz layout.</description>
+  <maintainer email="udins22@gmail.com">Nordin</maintainer>
+  <license>Apache-2.0</license>
+  <exec_depend>iro_ros</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>rplidar_ros</exec_depend>
+  <exec_depend>v4l2_camera</exec_depend>
+  <exec_depend>depthai_ros_driver</exec_depend>
+  <exec_depend>diagnostic_aggregator</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

@@ -6,6 +6,8 @@ IRO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export IRO_ROOT
 export PATH="$HOME/.local/bin:$PATH"
 export HF_LEROBOT_CALIBRATION="$IRO_ROOT/arm/calibration"
+# The iro package (doctor, hardware helpers) for scripts and ROS nodes
+case ":${PYTHONPATH:-}:" in *":$IRO_ROOT:"*) ;; *) export PYTHONPATH="$IRO_ROOT${PYTHONPATH:+:$PYTHONPATH}" ;; esac
 
 # Stable port names from tools/99-iro-usb.rules; fall back to the raw device.
 if [ -e /dev/so101 ]; then export SO101_PORT=/dev/so101; else export SO101_PORT=/dev/ttyACM0; fi
