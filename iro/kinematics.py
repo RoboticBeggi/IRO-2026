@@ -85,8 +85,11 @@ class Kinematics:
         """Joints putting the tip at xyz with the gripper pointing straight down
         (tilt: radians away from vertical; positive leans toward the base, negative leans
         outward, which the SO-101 wrist needs above about 8 cm). Returns (q, error_m).
-        Damped least squares on position + the tip's z axis; keeps joint limits."""
+        Damped least squares on position + the tip's z axis; keeps joint limits.
+        wrist_roll is NOT solved: it stays at q_seed's value. Roll does not change where the
+        tip is or where it points, so a solver left free to turn it twists the gripper sideways."""
         q = np.clip(np.array(q_seed, float), self.limits[:, 0], self.limits[:, 1])
+        active = [0, 1, 2, 3]   # pan, lift, elbow, wrist_flex
         target = np.asarray(xyz, float)
         down = np.array([0.0, 0.0, -1.0])
         if tilt:
@@ -102,12 +105,13 @@ class Kinematics:
             e = residual(q)
             if np.linalg.norm(e[:3]) < tol and np.linalg.norm(e[3:]) < 0.01 * 0.1:
                 break
-            J = np.zeros((6, 5))
-            for i in range(5):
+            J = np.zeros((6, len(active)))
+            for k, i in enumerate(active):
                 dq = np.zeros(5)
                 dq[i] = 1e-5
-                J[:, i] = (residual(q) - residual(q + dq)) / 1e-5
+                J[:, k] = (residual(q) - residual(q + dq)) / 1e-5
             lam = 0.01
-            step = J.T @ np.linalg.solve(J @ J.T + lam * np.eye(6), e)
+            step = np.zeros(5)
+            step[active] = J.T @ np.linalg.solve(J @ J.T + lam * np.eye(6), e)
             q = np.clip(q + np.clip(step, -0.2, 0.2), self.limits[:, 0], self.limits[:, 1])
         return q, float(np.linalg.norm(target - self.fk(q)[:3, 3]))

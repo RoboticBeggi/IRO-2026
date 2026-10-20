@@ -164,7 +164,6 @@ def cmd_add(name, rounds):
     with Arm() as arm:
         poses = capture_poses(arm, cfg)
         print(f"{len(poses)} camera poses. Moving to the work area...")
-        arm.gripper(open=True)
         look_at(arm, cfg, cfg["look_xy"])
         input("\n1. CLEAR the work area under the camera (nothing there, hands away). Enter. ")
         bgs = []

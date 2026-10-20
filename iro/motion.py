@@ -142,11 +142,21 @@ class Arm:
         time.sleep(0.2)
         self._check_servos()
 
-    def move_tip(self, xyz, duration=None, tilt=0.0):
-        """Gripper tip to xyz (metres, base_link), pointing straight down."""
-        q, err = self.kin.ik_down(xyz, self.joints(), tilt=tilt)
+    def level_roll(self):
+        """Wrist roll with the jaws level: raw 2048 = the calibration middle pose."""
+        return self.to_rad("wrist_roll", TICKS // 2)
+
+    def move_tip(self, xyz, duration=None, tilt=0.0, roll=None):
+        """Gripper tip to xyz (metres, base_link), pointing straight down. The wrist roll is
+        held at `roll` (default: jaws level), so the gripper and camera never twist sideways."""
+        roll = self.level_roll() if roll is None else roll
+        start = self.joints()
+        start[4] = roll
+        q, err = self.kin.ik_down(xyz, start, tilt=tilt)
         if err > 0.003:  # stuck from the current pose: try a few typical poses as starting points
             for seed in SEEDS:
+                seed = np.array(seed)
+                seed[4] = roll
                 q2, err2 = self.kin.ik_down(xyz, seed, tilt=tilt)
                 if err2 < err:
                     q, err = q2, err2
