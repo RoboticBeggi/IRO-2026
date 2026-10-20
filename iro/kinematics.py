@@ -54,30 +54,37 @@ class Kinematics:
                 "limit": (float(lim.get("lower")), float(lim.get("upper"))) if lim is not None else None,
             }
         self.limits = np.array([self._by_name(n)["limit"] for n in JOINTS])
+        self._chains = {}
 
     def _by_name(self, name):
         return next(j for j in self.joints.values() if j["name"] == name)
 
     def _chain(self, link):
-        chain = []
-        while link in self.joints:
-            chain.append(self.joints[link])
-            link = self.joints[link]["parent"]
-        return chain[::-1]
+        """Joints from base_link to `link`, as (origin, axis, index into q or None); cached."""
+        if link not in self._chains:
+            chain, cur = [], link
+            while cur in self.joints:
+                j = self.joints[cur]
+                idx = JOINTS.index(j["name"]) if j["name"] in JOINTS else None
+                chain.append((j["origin"], j["axis"] if j["type"] == "revolute" else None, idx))
+                cur = j["parent"]
+            self._chains[link] = chain[::-1]
+        return self._chains[link]
 
     def fk(self, q, link=TIP) -> np.ndarray:
         """4x4 transform of `link` in base_link for joint angles q (len 5)."""
-        angles = dict(zip(JOINTS, q))
         T = np.eye(4)
-        for j in self._chain(link):
-            T = T @ j["origin"]
-            if j["type"] == "revolute":
-                T = T @ _tf(_axis_angle(j["axis"], angles.get(j["name"], 0.0)))
+        for origin, axis, idx in self._chain(link):
+            T = T @ origin
+            if axis is not None and idx is not None:
+                R = _axis_angle(axis, q[idx])
+                T[:3, :3] = T[:3, :3] @ R
         return T
 
     def ik_down(self, xyz, q_seed, tilt=0.0, iters=200, tol=1e-3):
         """Joints putting the tip at xyz with the gripper pointing straight down
-        (tilt: radians away from vertical, toward the base). Returns (q, error_m).
+        (tilt: radians away from vertical; positive leans toward the base, negative leans
+        outward, which the SO-101 wrist needs above about 8 cm). Returns (q, error_m).
         Damped least squares on position + the tip's z axis; keeps joint limits."""
         q = np.clip(np.array(q_seed, float), self.limits[:, 0], self.limits[:, 1])
         target = np.asarray(xyz, float)

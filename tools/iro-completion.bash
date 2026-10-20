@@ -3,11 +3,12 @@ _iro() {
     local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[1]:-}
     local words
     if [ "$COMP_CWORD" -eq 1 ]; then
-        words="help doctor arm lidar hw prizm backup up mirror topics ros build setup shell code"
+        words="help doctor arm pick lidar hw prizm backup up mirror topics ros build setup shell code"
     else
         case "$prev" in
             doctor) words="full quick watch jetson devices arm backup --json" ;;
             arm) words="scan calibrate off" ;;
+            pick) words="look teach bottle cup --dry-run --drop" ;;
             lidar) words="info reset" ;;
             hw) words="snapshot" ;;
             prizm) words="ping backup restore" ;;

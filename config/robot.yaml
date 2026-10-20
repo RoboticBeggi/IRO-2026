@@ -35,6 +35,30 @@ mounts:
   lidar: {xyz: [0.0, 0.0, 0.10], rpy: [0, 0, 0]}
   depth_camera: {xyz: [0.10, 0.0, 0.05], rpy: [0, 0, 0]}
 
+# Autonomous pick-up with the wrist camera + YOLO (`iro pick`). Metres, in base_link
+# (origin under the arm's base; z up). Arm standing on the table => table_z about 0.
+pick:
+  table_z: 0.0
+  clearance: 0.01             # the tip never goes lower than table_z + clearance
+  max_joint_speed: 0.8        # rad/s
+  # Look pose: tip at look_xy, height look_z, gripper leaning look_tilt_deg outward.
+  # Straight down only reaches up to about 8 cm (wrist limit 95 deg); leaning out
+  # 25 deg reaches 12 cm at 15-25 cm in front of the base.
+  look_xy: [0.20, 0.0]
+  look_z: 0.12
+  look_tilt_deg: -25
+  grasp_z: 0.02               # tip height when closing on an object
+  lift_z: 0.08                # highest straight-down pose the arm reaches
+  gripper_open_pct: 70        # % of the calibrated gripper range
+  gripper_closed_pct: 0
+  model: yolo11n.pt           # in models/
+  classes: [bottle, cup, cell phone, remote, scissors, banana, apple, orange, mouse, sports ball]
+  min_conf: 0.4
+  # Pixel where an object sits when it is straight under the gripper at look height.
+  # Set by `iro pick teach`; null = image centre.
+  grasp_pixel: null
+  servo_tolerance_px: 8
+
 limits:
   jetson:
     temp_warn_c: 80

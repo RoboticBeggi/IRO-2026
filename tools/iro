@@ -30,6 +30,9 @@ ARM (SO-ARM101)
   iro arm scan            are all 6 servos there? temps, volts (read-only)
   iro arm calibrate       LeRobot calibration, then backs it up
   iro arm off             torque off on all servos (HOLD THE ARM, it goes limp)
+  iro pick [object]       find an object with YOLO and pick it up (--dry-run, --drop)
+  iro pick look           go to the look pose, show what YOLO sees
+  iro pick teach          one-time pick setup with your hands on the arm
 
 DEVICES
   iro lidar               lidar model and health
@@ -93,6 +96,8 @@ from iro import load_config; from iro.hw import rplidar
 d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))" ;;
             *) die "unknown: iro lidar $1 (info | reset)" ;;
         esac ;;
+
+    pick) exec python -m iro.pick "$@" ;;
 
     hw) [ "${1:-snapshot}" = snapshot ] || die "usage: iro hw snapshot"; exec python -m iro.hwsnap ;;
 
