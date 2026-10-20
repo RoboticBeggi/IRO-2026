@@ -37,6 +37,12 @@ ARM (SO-ARM101)
   iro pick look           go to the look pose, show what YOLO sees
   iro pick teach          one-time pick setup with your hands on the arm
 
+VISION
+  iro vision              live wrist camera + YOLO boxes in the browser (http://localhost:8080)
+  iro object add NAME     teach a new object: the arm films it from many angles, labels itself
+  iro object train        train YOLO on all taught objects (10-20 min)
+  iro object list         taught objects
+
 DEVICES
   iro lidar               lidar model and health
   iro lidar reset         restart the lidar (clears a latched error)
@@ -103,6 +109,8 @@ d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))"
         esac ;;
 
     pick) exec python -m iro.pick "$@" ;;
+    vision) exec python -u -m iro.vision "$@" ;;
+    object) exec python -m iro.objects "$@" ;;
 
     hw) [ "${1:-snapshot}" = snapshot ] || die "usage: iro hw snapshot"; exec python -m iro.hwsnap ;;
 

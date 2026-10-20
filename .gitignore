@@ -21,3 +21,6 @@ datasets/
 *.bag
 *.mcap
 *.mp4
+
+# Taught-object model: small, and slow to retrain, so it IS backed up
+!objects/model/*.pt

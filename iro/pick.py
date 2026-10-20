@@ -48,54 +48,43 @@ def pick_config() -> dict:
 
 
 class Eye:
-    """Wrist camera + YOLO."""
+    """Wrist camera + YOLO (stock classes and your taught objects, see `iro object`)."""
 
     def __init__(self, cfg):
-        from ultralytics import YOLO
-        dev = load_config()["devices"]["arm_camera"]["device"]
-        self.cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.model = YOLO(str(ROOT / "models" / cfg["model"]))
+        from iro.objects import Detector, open_camera
+        self.cap = open_camera()
+        self.det = Detector(conf=cfg["min_conf"])
         self.cfg = cfg
         self.size = None
 
     def frame(self):
-        for _ in range(4):           # drop frames buffered while the arm was moving
-            self.cap.grab()
-        ok, f = self.cap.read()
-        if not ok:
-            raise RuntimeError("wrist camera gives no image")
+        from iro.objects import grab
+        f = grab(self.cap)
         self.size = f.shape[1], f.shape[0]
         return f
+
+    def classes(self):
+        return list(self.cfg["classes"]) + self.det.taught_names
 
     def detect(self, want=None, near=None, save=True):
         """Best detection of the wanted class(es): (name, conf, (u, v) centre, box) or None.
         `near`: prefer the one closest to this pixel (tracking the same object)."""
-        f = self.frame()
-        r = self.model.predict(f, device=0, verbose=False, conf=self.cfg["min_conf"])[0]
-        classes = [want] if want else self.cfg["classes"]
-        found = []
-        for box, c, p in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.cls, r.boxes.conf):
-            name = r.names[int(c)]
-            if name in classes:
-                u, v = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-                found.append((name, float(p), np.array([u, v]), box))
+        found, img = self.det.detect(self.frame(), conf=self.cfg["min_conf"], draw=save)
         if save:
-            cv2.imwrite(str(SNAP), r.plot())
+            cv2.imwrite(str(SNAP), img)
+        classes = [want] if want else self.classes()
+        found = [(n, p, c, b) for n, p, c, b, _ in found if n in classes]
         if not found:
             return None
         if near is not None:
             return min(found, key=lambda d: np.linalg.norm(d[2] - near))
-        return max(found, key=lambda d: d[1])
+        return found[0]
 
     def everything(self, conf=0.15):
-        """All YOLO detections (any of the 80 classes), best first: [(name, conf, (u, v))]."""
-        r = self.model.predict(self.frame(), device=0, verbose=False, conf=conf)[0]
-        cv2.imwrite(str(SNAP), r.plot())
-        out = [(r.names[int(c)], float(p), np.array([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]))
-               for b, c, p in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.cls, r.boxes.conf)]
-        return sorted(out, key=lambda d: -d[1])
+        """All detections (stock + taught), best first: [(name, conf, (u, v))]."""
+        found, img = self.det.detect(self.frame(), conf=conf, draw=True)
+        cv2.imwrite(str(SNAP), img)
+        return [(n, p, c) for n, p, c, _, _ in found]
 
     def grasp_pixel(self):
         gp = self.cfg.get("grasp_pixel")
@@ -133,7 +122,7 @@ def do_pick(args, cfg):
         look_at(arm, cfg, look)
         d = eye.detect(args.object)
         if d is None:
-            print(f"   nothing found (classes: {args.object or cfg['classes']}). What the camera saw: {SNAP}")
+            print(f"   nothing found (classes: {args.object or eye.classes()}). What the camera saw: {SNAP}")
             return 1
         name, conf, p, _ = d
         print(f"   found {name} ({conf:.2f}) at pixel {np.round(p)}")
@@ -190,7 +179,7 @@ def do_look(args, cfg):
         look_at(arm, cfg, cfg["look_xy"])
         while True:
             seen = eye.everything()
-            ok = [d for d in seen if d[0] in cfg["classes"] and d[1] >= cfg["min_conf"]]
+            ok = [d for d in seen if d[0] in eye.classes() and d[1] >= cfg["min_conf"]]
             print("YOLO sees: " + (", ".join(f"{n} {c:.2f}" for n, c, _ in seen[:8]) or "nothing")
                   + (f"   -> can pick: {ok[0][0]}" if ok else "   -> nothing pickable"))
             if input(f"(image: {SNAP})  Enter = look again, q = quit: ").strip().lower() == "q":
@@ -238,7 +227,7 @@ def do_teach(args, cfg):
             if d is not None:
                 break
             seen = eye.everything()
-            print(f"   YOLO does not see a pick object ({want or ', '.join(cfg['classes'])}). Image: {SNAP}")
+            print(f"   YOLO does not see a pick object ({want or ', '.join(eye.classes())}). Image: {SNAP}")
             print("   It does see: " + (", ".join(f"{n} {c:.2f} at {np.round(p)}" for n, c, p in seen[:6]) or "nothing"))
             a = input("   Do NOT move the object. Enter = look again, a class name (e.g. 'book') = use that, "
                       "q = stop (heights stay saved): ").strip()
