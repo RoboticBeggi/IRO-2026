@@ -65,8 +65,13 @@ def main() -> int:
         if extra:
             print(f"  UNEXPECTED ids {extra}: two servos may share an ID, or one was never set")
             ok = False
+        if not found:
+            print("NO servo answers: the arm's 12 V power supply is off or unplugged, or the cable from "
+                  "the board to the first (base) servo is loose. The USB side is fine.")
+            return 1
         if not ok:
-            print("Fix the IDs before calibrating (lerobot-setup-motors, one servo connected at a time).")
+            print("Some answer, some don't: check the cable into the first missing servo (the chain runs "
+                  "base -> gripper). Wrong IDs only if a servo was replaced: lerobot-setup-motors.")
             return 1
 
         pos = bus.sync_read("Present_Position", normalize=False)
