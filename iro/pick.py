@@ -185,13 +185,13 @@ def do_teach(args, cfg):
         arm.limp()
         input("Tip touching the table? Press Enter. ")
         taught["table_z"] = round(float(arm.tip()[2]), 4)
-        expected = -cfg["mount_height"]
-        print(f"   table_z = {taught['table_z']} (expected about {expected} from the mount height)")
+        expected = cfg["table_z"]   # from `iro arm zero` if it ran, else -mount_height
+        print(f"   table_z = {taught['table_z']} (expected about {expected})")
         if abs(taught["table_z"] - expected) > 0.015:
             arm.hold()
             print(f"   That is {abs(taught['table_z'] - expected) * 100:.1f} cm off. Either a joint counts the wrong "
-                  "way (run `iro arm check`), the tip was not the part touching the table, or mount_height in "
-                  "config/robot.yaml is wrong. Nothing saved.")
+                  "way (run `iro arm check`), the joint zero errors are not corrected yet (run `iro arm zero`), "
+                  "or the jaw tips were not what touched the table. Nothing saved.")
             return 1
         input("Now open the jaws by hand around an object standing on the table, at a good grasp "
               "height, gripper pointing straight down. Press Enter when it is in place. ")
