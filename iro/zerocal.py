@@ -32,7 +32,7 @@ def fingertip_z(kin, q):
     return T[2, 3] + FINGER * T[2, 2]
 
 
-MAX_OFF = np.radians(10)   # fine-tune only: `iro arm align` fixes anything bigger by eye
+MAX_OFF = np.radians(20)   # fine-tune: `iro arm align` fixes anything bigger by eye (elbow needed 14 deg on 20 Oct)
 
 
 def solve(kin, qs, table_guess):
@@ -55,7 +55,7 @@ def solve(kin, qs, table_guess):
         return np.array(r)
 
     lam, cost = 1e-3, np.sum(residuals(p) ** 2)
-    for _ in range(200):           # Levenberg-Marquardt: damped steps, kept only if they help
+    for _ in range(80):            # Levenberg-Marquardt: damped steps, kept only if they help
         r = residuals(p)
         J = np.zeros((len(r), len(p)))
         for i in range(len(p)):
@@ -81,23 +81,37 @@ def solve(kin, qs, table_guess):
 
 
 def robust_solve(kin, qs, table_guess, bad_mm=4.0):
-    """Leave-one-out: judge each touch against a fit made without it; drop the worst while it is
-    clearly off (side of a jaw touched, arm slipped), at most 25% of the touches."""
+    """Drop touches that do not fit (side of a jaw touched, arm slipped), at most 25%.
+    Each touch is judged by its leave-one-out residual r / (1 - leverage): how far it
+    would be from a fit made WITHOUT it (the standard least-squares shortcut, so one
+    fit per round instead of one per touch)."""
+    idx = [JOINTS.index(j) for j in SOLVE]
     keep = list(range(len(qs)))
-    while len(keep) > max(MIN_TOUCHES, int(0.75 * len(qs))):
-        loo = []
-        for i in keep:
-            others = [qs[j] for j in keep if j != i]
-            offs, table, _, _ = solve(kin, others, table_guess)
-            idx = [JOINTS.index(j) for j in SOLVE]
-            qq = np.array(qs[i], float)
-            qq[idx] += [offs[j] for j in SOLVE]
-            loo.append(abs(fingertip_z(kin, qq) - table))
+    while True:
+        sub = [qs[i] for i in keep]
+        offs, table, rms, fit = solve(kin, sub, table_guess)
+        if len(keep) <= max(MIN_TOUCHES, int(0.75 * len(qs))):
+            break
+        p = np.array([offs[j] for j in SOLVE] + [table])
+
+        def res(p):
+            out = []
+            for q in sub:
+                qq = np.array(q, float)
+                qq[idx] += p[:-1]
+                out.append(fingertip_z(kin, qq) - p[-1])
+            return np.array(out)
+        J = np.zeros((len(sub), len(p)))
+        for i in range(len(p)):
+            dp = np.zeros(len(p))
+            dp[i] = 1e-6
+            J[:, i] = (res(p + dp) - fit) / 1e-6
+        H = J @ np.linalg.pinv(J.T @ J) @ J.T
+        loo = np.abs(fit) / np.clip(1 - np.diag(H), 0.05, 1)
         worst = int(np.argmax(loo))
         if loo[worst] * 1000 < bad_mm:
             break
         keep.pop(worst)
-    offs, table, rms, _ = solve(kin, [qs[i] for i in keep], table_guess)
     return offs, table, rms, sorted(set(range(len(qs))) - set(keep))
 
 
@@ -105,7 +119,7 @@ def main():
     cfg = load_config()
     d = cfg["devices"]["arm"]
     signs = d.get("joint_signs", {})
-    # Start from the saved offsets (from `iro arm align`); this only fine-tunes lift/elbow/wrist
+    # Start from the saved offsets (from `iro arm align`); this only fine-tunes lift/elbow/wrist (up to ±20 deg)
     base = {j: np.radians(v) for j, v in d.get("joint_offsets_deg", {}).items()}
     log = ROOT / "arm" / "calibration" / f"touches_{time.strftime('%Y%m%d-%H%M%S')}.json"
     kin = Kinematics()
