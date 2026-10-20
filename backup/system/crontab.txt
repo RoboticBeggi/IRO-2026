@@ -1,0 +1,2 @@
+*/30 * * * * /home/orin_nano/iro-2026/tools/backup.sh >> /home/orin_nano/.iro-backup.log 2>&1
+@reboot sleep 120 && /home/orin_nano/iro-2026/tools/backup.sh >> /home/orin_nano/.iro-backup.log 2>&1

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# iro: one command for everything on the robot. Works from any folder.
+#   iro help        list of commands
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+set +u; . "$ROOT/env.sh" >/dev/null; set -u
+export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
+ROS_SETUP=/opt/ros/humble/setup.bash
+WS_SETUP="$ROOT/ros2_ws/install/setup.bash"
+
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+die() { echo "iro: $*" >&2; exit 1; }
+
+ros_env() {
+    [ -f "$ROS_SETUP" ] || die "ROS 2 is not installed yet. Run: iro setup"
+    set +u; . "$ROS_SETUP"; [ -f "$WS_SETUP" ] && . "$WS_SETUP"; set -u
+}
+
+usage() {
+    cat <<'EOF'
+iro - IRO 2026 robot commands (run from anywhere)
+
+HEALTH
+  iro doctor              full checkup with diagnosis and fixes
+  iro doctor quick        faster checkup (skips GPU and SSD log)
+  iro doctor watch        live watch of power, heat and servos (Ctrl+C stops)
+  iro doctor arm          only one group: jetson | devices | arm | backup
+
+ARM (SO-ARM101)
+  iro arm scan            are all 6 servos there? temps, volts (read-only)
+  iro arm calibrate       LeRobot calibration, then backs it up
+  iro arm off             torque off on all servos (HOLD THE ARM, it goes limp)
+
+DEVICES
+  iro lidar               lidar model and health
+  iro lidar reset         restart the lidar (clears a latched error)
+  iro hw snapshot         save every component's stored settings to backup/
+  iro prizm find          identify the PRIZM on USB
+  iro prizm backup        copy the program off the PRIZM
+  iro prizm restore FILE  put a saved program back on the PRIZM
+
+ROS 2
+  iro up [parts]          start the robot (default: everything plugged in)
+                          parts: arm lidar camera depth doctor rviz
+  iro mirror              RViz arm that follows the real arm
+  iro topics              list live ROS topics
+  iro build               build the ROS 2 packages after code changes
+
+BACKUP
+  iro backup              back up now (GitHub if online, USB if plugged in)
+  iro backup status       when was the last snapshot, push, USB copy
+  iro backup log          last backup runs
+  iro backup kit          also copy the Python env + tools to USB (offline rebuild)
+  iro backup verify       prove the USB/GitHub copy restores
+  iro backup install      turn on automatic backup (every 10 min)
+
+SETUP
+  iro setup               install/repair everything (asks for sudo password)
+  iro shell               a terminal in the project with everything loaded
+  iro code                open the project in VS Code
+EOF
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    help|-h|--help) usage ;;
+
+    doctor) exec python -m iro.doctor "$@" ;;
+
+    arm)
+        sub="${1:-scan}"; shift || true
+        case "$sub" in
+            scan) exec python "$ROOT/arm/scan_motors.py" "$@" ;;
+            calibrate)
+                lerobot-calibrate --robot.type=so101_follower --robot.port="$SO101_PORT" --robot.id="$SO101_ID" "$@" \
+                    && python -m iro.doctor full arm && "$ROOT/tools/backup.sh" ;;
+            off)
+                read -r -p "Torque OFF: the arm will go limp. Holding it? [y/N] " a
+                [ "$a" = y ] && exec python -c "
+from iro import load_config; from iro.hw.servos import open_bus
+d=load_config()['devices']['arm']
+with open_bus(d['port'], d['servo_ids']) as b: b.disable_torque(); print('torque off')" ;;
+            *) die "unknown: iro arm $sub (scan | calibrate | off)" ;;
+        esac ;;
+
+    lidar)
+        case "${1:-info}" in
+            info) exec python -c "
+from iro import load_config; from iro.hw import rplidar
+d=load_config()['devices']['lidar']; print(rplidar.probe(d['port'], d['baud']))" ;;
+            reset) exec python -c "
+from iro import load_config; from iro.hw import rplidar
+d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))" ;;
+            *) die "unknown: iro lidar $1 (info | reset)" ;;
+        esac ;;
+
+    hw) [ "${1:-snapshot}" = snapshot ] || die "usage: iro hw snapshot"; exec python -m iro.hwsnap ;;
+
+    prizm) exec python -m iro.prizm "$@" ;;
+
+    backup)
+        case "${1:-now}" in
+            now) exec "$ROOT/tools/backup.sh" ;;
+            kit) exec "$ROOT/tools/backup.sh" --offline-kit ;;
+            status) python -m iro.doctor full backup; tail -n 3 ~/.iro-backup.log 2>/dev/null ;;
+            log) exec tail -n "${2:-30}" ~/.iro-backup.log ;;
+            install) exec "$ROOT/tools/install-autobackup.sh" ;;
+            verify) exec "$ROOT/tools/verify-backup.sh" ;;
+            *) die "unknown: iro backup $1 (now | status | log | kit | verify | install)" ;;
+        esac ;;
+
+    up)
+        ros_env
+        parts=$(IFS=,; echo "${*:-all}")
+        exec ros2 launch iro_bringup robot.launch.py parts:="$parts" ;;
+    mirror) ros_env; exec ros2 launch iro_bringup mirror.launch.py "$@" ;;
+    topics) ros_env; exec ros2 topic list "$@" ;;
+    ros) ros_env; exec ros2 "$@" ;;
+    build)
+        ros_env
+        cd "$ROOT/ros2_ws" && colcon build --symlink-install "$@" ;;
+
+    setup) exec "$ROOT/tools/bootstrap.sh" ;;
+    shell) cd "$ROOT"; [ -f "$ROS_SETUP" ] && ros_env; bold "iro shell: project loaded (exit to leave)"; exec bash -i ;;
+    code) exec code "$ROOT" ;;
+
+    *) usage; die "unknown command: $cmd" ;;
+esac

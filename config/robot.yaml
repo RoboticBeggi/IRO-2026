@@ -1,0 +1,51 @@
+# One place for every device and every safety limit on the robot.
+# Used by `iro doctor`, the ROS 2 nodes and the tools. Change values here, not in code.
+
+devices:
+  arm:
+    port: /dev/so101            # udev symlink, see tools/99-iro-usb.rules
+    usb: "1a86:55d3"
+    servo_ids: {shoulder_pan: 1, shoulder_lift: 2, elbow_flex: 3, wrist_flex: 4, wrist_roll: 5, gripper: 6}
+    # Joints allowed a full 0-4095 calibration range (they turn all the way round)
+    continuous_joints: [wrist_roll]
+  lidar:
+    port: /dev/rplidar
+    usb: "10c4:ea60"
+    baud: 1000000               # RPLidar S2 (model byte 0x71)
+  arm_camera:
+    device: /dev/video0         # "openaicam" global-shutter camera
+    usb: "32e6:9251"
+  depth_camera:
+    usb: ["03e7:2485", "03e7:f63b"]   # OAK-D: unbooted / booted
+  mic_array:
+    usb: "2886:001a"            # reSpeaker XVF3800
+    alsa_name: "XVF3800"
+  prizm:
+    # TETRIX PRIZM (Arduino-based). Not yet seen on USB; fill in once plugged in.
+    port: /dev/prizm
+    usb: null
+
+limits:
+  jetson:
+    temp_warn_c: 80
+    temp_fail_c: 92
+    vdd_in_min_mv: 4750         # module input rail, nominal 5.0 V
+    ram_free_warn_mb: 1000
+    ram_free_fail_mb: 400
+    disk_free_warn_gb: 20
+    disk_free_fail_gb: 5
+    power_mode: MAXN_SUPER
+  servos:                       # STS3215, 12 V version
+    volt_warn: 11.0
+    volt_fail: 10.0
+    volt_max: 13.0
+    temp_warn_c: 55
+    temp_fail_c: 65             # servo shuts itself down at 70
+    load_warn_pct: 80
+  backup:
+    snapshot_max_age_min: 30
+    push_max_age_h: 24
+
+backup:
+  usb_label: IRO_BACKUP         # USB drive name for offline backups
+  interval_min: 10
