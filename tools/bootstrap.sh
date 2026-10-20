@@ -34,7 +34,8 @@ if [ -d "$ROOT/backup/claude-memory" ]; then
 fi
 
 echo "== 4/4 Check"
-"$VENV/bin/python" -c "import torch, lerobot; print('torch', torch.__version__, 'CUDA', torch.cuda.is_available())"
+set +u; . "$ROOT/env.sh"; set -u
+python -c "import torch, lerobot; print('torch', torch.__version__, 'CUDA', torch.cuda.is_available())"
 
 cat <<EOF
 

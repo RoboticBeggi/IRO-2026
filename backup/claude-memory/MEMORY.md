@@ -1,1 +1,2 @@
-- [Jetson hardware state](jetson-hardware-state.md) — devices/software actually on the Orin Nano; ROS 2 not yet installed
+- [Jetson hardware state](jetson-hardware-state.md) — devices, venv, cuDSS quirk, SO-101 state on the Orin Nano
+- [Backup failsafe](backup-failsafe.md) — SSD died before; keep all state recoverable via repo + tools/backup.sh

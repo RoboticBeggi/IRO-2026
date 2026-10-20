@@ -1,3 +1,5 @@
 # Installed from PyPI after requirements-torch.txt.
 # Exact versions of everything are in requirements-lock.txt (written by tools/backup.sh).
 lerobot[feetech]==0.4.4
+# libcudss.so.0 for the Jetson torch build; env.sh puts it on LD_LIBRARY_PATH
+nvidia-cudss-cu12==0.8.0.10

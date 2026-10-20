@@ -13,6 +13,8 @@ export SO101_ID=iro_follower
 
 if [ -f "$HOME/.venvs/iro/bin/activate" ]; then
     . "$HOME/.venvs/iro/bin/activate"
+    # The Jetson torch build needs libcudss.so.0, which comes from pip, not JetPack
+    export LD_LIBRARY_PATH="$HOME/.venvs/iro/lib/python3.10/site-packages/nvidia/cu12/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 else
     echo "env.sh: ~/.venvs/iro missing, run tools/bootstrap.sh" >&2
 fi
