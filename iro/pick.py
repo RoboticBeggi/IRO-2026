@@ -85,6 +85,15 @@ class Eye:
             return min(found, key=lambda d: np.linalg.norm(d[2] - near))
         return found[0]
 
+    def detect_retry(self, want=None, near=None, tries=3):
+        """Like detect, but a single missed frame (the finder sometimes skips an object for a
+        frame) does not abort a pick: try up to `tries` fresh frames."""
+        for _ in range(tries):
+            d = self.detect(want, near=near)
+            if d is not None:
+                return d
+        return None
+
     def everything(self, conf=0.15):
         """All detections (stock + taught), best first: [(name, conf, (u, v))]."""
         found, img = self.det.detect(self.frame(), conf=conf, draw=True)
@@ -109,7 +118,7 @@ def estimate_jacobian(arm, eye, cfg, want, xy0, p0, step=0.02):
         xy = np.array(xy0, float)
         xy[i] += step
         look_at(arm, cfg, xy)
-        d = eye.detect(want, near=p0)
+        d = eye.detect_retry(want, near=p0)
         if d is None:
             raise MotionError("lost the object during the test move; is it near the edge of the image?")
         J[:, i] = (d[2] - p0) / step
@@ -126,7 +135,7 @@ def do_pick(args, cfg):
         print(f"1. look pose above {look}, {cfg['look_height'] * 100:.0f} cm above the table")
         arm.gripper(open=True)
         look_at(arm, cfg, look)
-        d = eye.detect(args.object)
+        d = eye.detect_retry(args.object)
         if d is None:
             print(f"   nothing found (classes: {args.object or eye.classes()}). What the camera saw: {SNAP}")
             return 1
@@ -144,7 +153,7 @@ def do_pick(args, cfg):
         print("3. centring the object under the gripper")
         xy, target = look.copy(), eye.grasp_pixel()
         for it in range(15):
-            d = eye.detect(name, near=p)
+            d = eye.detect_retry(name, near=p)
             if d is None:
                 raise MotionError("lost the object while centring")
             p = d[2]
@@ -229,7 +238,7 @@ def do_teach(args, cfg):
         look_at(arm, cfg, tip[:2])
         want = None
         while True:
-            d = eye.detect(want)
+            d = eye.detect_retry(want)
             if d is not None:
                 break
             seen = eye.everything()
