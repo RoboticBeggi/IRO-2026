@@ -33,6 +33,11 @@ def main() -> int:
     parser.add_argument("--port", default=os.environ.get("SO101_PORT", "/dev/ttyACM0"))
     args = parser.parse_args()
 
+    from iro.hw.system import users_of
+    if users_of(args.port):
+        pid, name = users_of(args.port)[0]
+        print(f"The arm is in use by {name} (pid {pid}); its health is on /diagnostics. `iro stop` frees it.")
+        return 1
     bus = FeetechMotorsBus(
         port=args.port,
         motors={name: Motor(id_, "sts3215", MotorNormMode.RANGE_M100_100) for name, id_ in JOINTS.items()},

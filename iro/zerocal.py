@@ -174,4 +174,8 @@ def finish(cfg, kin, qs, base, log):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from iro.hw.servos import BusyError
+    try:
+        sys.exit(main())
+    except BusyError as e:
+        sys.exit(f"STOPPED: {e}")

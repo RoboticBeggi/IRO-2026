@@ -10,7 +10,9 @@ Do the big ones first (roll), then shoulder, elbow, wrist. Put the real arm in t
 middle pose (L shape) and compare it from the side and from above.
 """
 
+import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -34,18 +36,36 @@ def save(offsets):
     path.write_text(text)
 
 
+def stop(proc):
+    """Ctrl+C the whole mirror (launch + arm node + RViz), escalating if it hangs."""
+    for sig, wait in ((signal.SIGINT, 8), (signal.SIGTERM, 4), (signal.SIGKILL, 2)):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            return
+        try:
+            proc.wait(timeout=wait)
+            time.sleep(0.5)
+            if not subprocess.run(["pgrep", "-g", str(proc.pid)], capture_output=True).stdout:
+                return
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def main():
     cfg_off = load_config()["devices"]["arm"].get("joint_offsets_deg", {})
     offsets = {j: float(cfg_off.get(j, 0.0)) for j in NAMES}
     print(__doc__)
-    mirror = subprocess.Popen([str(ROOT / "tools" / "iro"), "mirror"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Own process group, so quitting stops the launch AND every node it started
+    mirror = subprocess.Popen([str(ROOT / "tools" / "iro"), "mirror"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, start_new_session=True)
     rclpy.init()
     node = rclpy.create_node("arm_align")
     cli = node.create_client(SetParameters, "/arm/set_parameters")
     print("Starting the mirror and RViz...")
     if not cli.wait_for_service(timeout_sec=30):
         print("The arm node did not start (is the arm powered? is another program using it?).")
-        mirror.terminate()
+        stop(mirror)
         return 1
 
     def push():
@@ -90,8 +110,7 @@ def main():
         if input("Save before leaving? [y/N] ").strip().lower() == "y":
             save(offsets)
             print("  saved")
-        mirror.terminate()
-        time.sleep(1)
+        stop(mirror)
         node.destroy_node()
         rclpy.try_shutdown()
     return 0

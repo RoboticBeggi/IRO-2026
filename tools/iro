@@ -50,6 +50,7 @@ ROS 2
                           parts: arm lidar camera depth doctor rviz
   iro mirror              RViz arm that follows the real arm
   iro topics              list live ROS topics
+  iro stop                stop everything started by iro up / iro mirror
   iro build               build the ROS 2 packages after code changes
 
 BACKUP
@@ -124,6 +125,11 @@ d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))"
         exec ros2 launch iro_bringup robot.launch.py parts:="$parts" ;;
     mirror) ros_env; exec ros2 launch iro_bringup mirror.launch.py "$@" ;;
     topics) ros_env; exec ros2 topic list "$@" ;;
+    stop)
+        pkill -INT -f "ros2 launch iro_bringup" ; pkill -INT -f "iro_ros/lib/iro_ros/" ; pkill -INT -x rviz2
+        sleep 3
+        pkill -TERM -f "iro_ros/lib/iro_ros/|robot_state_publisher|rplidar_node|static_transform_publisher" 2>/dev/null
+        echo "robot programs stopped" ;;
     ros) ros_env; exec ros2 "$@" ;;
     build)
         ros_env

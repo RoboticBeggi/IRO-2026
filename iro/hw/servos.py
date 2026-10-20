@@ -7,6 +7,10 @@ from lerobot.motors.feetech import FeetechMotorsBus
 
 STS3215_MODEL = 777
 
+
+class BusyError(RuntimeError):
+    pass
+
 # Servo "Status" register (address 65) error bits, from the Feetech STS manual
 STATUS_BITS = {
     0: "voltage out of range",
@@ -23,7 +27,17 @@ def decode_status(value: int) -> list[str]:
 
 @contextmanager
 def open_bus(port: str, servo_ids: dict[str, int]):
-    """Connect without handshake and never touch torque on the way out."""
+    """Connect without handshake and never touch torque on the way out.
+    Refuses if another program already has the port: two programs on one servo bus
+    garble each other's packets."""
+    import os
+
+    from iro.hw.system import users_of
+    others = [u for u in users_of(port) if u[0] != os.getpid()]
+    if others:
+        pid, name = others[0]
+        raise BusyError(f"the arm is in use by {name} (pid {pid}), probably `iro mirror` / `iro up`. "
+                        "Stop it first (Ctrl+C in its terminal, or `iro stop`).")
     bus = FeetechMotorsBus(
         port=port,
         motors={name: Motor(id_, "sts3215", MotorNormMode.RANGE_M100_100) for name, id_ in servo_ids.items()},

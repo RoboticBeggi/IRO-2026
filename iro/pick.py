@@ -25,6 +25,7 @@ import numpy as np
 import yaml
 
 from iro import ROOT, load_config
+from iro.hw.servos import BusyError
 from iro.motion import Arm, MotionError
 
 TAUGHT = ROOT / "config" / "pick_taught.yaml"   # written by `iro pick teach`, overrides robot.yaml
@@ -233,7 +234,7 @@ def main():
         a.object = None
     try:
         return {"pick": do_pick, "look": do_look, "teach": do_teach}[mode](a, cfg)
-    except MotionError as e:
+    except (MotionError, BusyError) as e:
         print(f"STOPPED: {e}")
         return 2
     except KeyboardInterrupt:
