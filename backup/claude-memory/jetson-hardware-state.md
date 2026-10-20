@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1cabac2b-8711-4426-81e7-373cd5327053
-  modified: 2026-10-20T06:38:44.908Z
+  modified: 2026-10-20T06:59:24.647Z
 ---
 
 Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname `ubuntu`, MAXN_SUPER.
@@ -20,6 +20,7 @@ Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname 
 - 20 Oct: arm check found all joint_signs +1. User saw RViz gripper turned sideways vs real → wrist_roll zero ~90 deg off (LeRobot middle pose != URDF zero). Arm setup order now: calibrate → check → `iro arm align` (live RViz offsets, roll first) → `iro arm zero` (table touches, LM solver, ±10 deg, leave-one-out outliers, touches logged to arm/calibration/touches_*.json; re-solve with `iro arm zero FILE`) → `iro pick teach`. First 42-touch zero run was lost (old tool didn't log) and failed because roll was 90 off.
 - 20 Oct 13:00: zero calib saved (lift -5.5, elbow +14, wrist -2.9, roll -90; table -13.2 cm below arm base, user's "4 cm" unconfirmed). Teach table touch matched (-12.2). Vision: `iro vision` MJPEG on :8080 (30 fps); `iro object add/train` (iro/objects.py) = arm sweeps poses, background-difference auto-labels, fine-tunes yolo11n → objects/model/objects.pt (tracked in git). Capture/labelling tested on fake objects only; training not yet run on real data.
 - Arm sag/hysteresis: LeRobot P gain 16 leaves shoulder/elbow 30-40 counts short (direction-dependent, up to 19 px in camera). Fixed in iro/motion.py: `_settle` closes the loop to ±3 counts; `move_joints_repeatable` approaches via fixed pre-pose; object capture replays stored joint angles; object_box phase-aligns frames. Repeat test after fix: worst 4.7 px, 0 false objects. One garbled temp read (66 C, real 38) → fault checks now confirm with a second read.
+- Object teaching v2 (20 Oct): heights relative to table (look 15 cm, lift 10, grasp 2.5); capture sweep 20 poses, 10-24 cm above table, ±8 cm sideways (pan -28..+34 deg); bg-diff box → MobileSAM box-prompt refine (models/mobile_sam.pt, 0.3 s/img) → masks; per-pose size consistency filter; training holds out last round per object, ~10% bg negatives, 150 copy-paste synth/object, mono-friendly aug. Real camera mount differs from URDF (looks forward, not down). 5-DOF arm can't view object sides → user rotates object between rounds.
 - Arm pick pipeline (iro/kinematics.py, iro/motion.py, iro/pick.py; `iro pick`): YOLO11n 30 fps on mono wrist cam; FK matches ROS TF exactly. SO-101 can point straight down only up to ~8 cm (wrist limit 95 deg); look pose leans 25 deg outward at 12 cm. Visual servoing with runtime image Jacobian; `iro pick teach` sets table_z/grasp_z/grasp_pixel. Not yet run on hardware (waits for recalibration).
 - Old lost project was named PUSAKA; see repo salvage/README.md.
 

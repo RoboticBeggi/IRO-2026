@@ -514,7 +514,7 @@ def synthesize(names, out_img, out_lab, per_object, rng):
     for i in range(per_object * len(names)):
         bg = cv2.imread(str(bgs[rng.integers(len(bgs))]))
         h, w = bg.shape[:2]
-        lines = []
+        lines, placed = [], []
         for _ in range(int(rng.integers(1, 4))):
             cls, obj, m = cuts[rng.integers(len(cuts))]
             scale = float(np.sqrt(rng.uniform(0.01, 0.12) * h * w / (obj.shape[0] * obj.shape[1])))
@@ -531,7 +531,10 @@ def synthesize(names, out_img, out_lab, per_object, rng):
             a = cv2.warpAffine(m, M, (nw, nh)).astype(np.float32) / 255
             a = cv2.GaussianBlur(a, (5, 5), 0)[..., None]          # soft edge, no cut-out halo
             x, y = int(rng.integers(0, w - nw)), int(rng.integers(0, h - nh))
-            bright = rng.uniform(0.8, 1.2)                          # lighting differences
+            if any(not (x + nw < px1 or px2 < x or y + nh < py1 or py2 < y) for px1, py1, px2, py2 in placed):
+                continue                                            # no stacking: keeps every label honest
+            placed.append((x, y, x + nw, y + nh))
+            bright = rng.uniform(0.85, 1.05)                        # lighting differences (never brighter-than-white)
             region = bg[y:y + nh, x:x + nw].astype(np.float32)
             bg[y:y + nh, x:x + nw] = np.clip(region * (1 - a) + o.astype(np.float32) * bright * a, 0, 255).astype(np.uint8)
             ys, xs = np.nonzero(a[..., 0] > 0.5)
