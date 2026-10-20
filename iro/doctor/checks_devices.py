@@ -108,6 +108,9 @@ def depth_camera(cfg):
                 return Result(G, "depth camera", WARN, "OAK-D detected but not usable without root",
                               "udev rule for the OAK-D missing: run iro setup")
             speed = open(f"{p}/speed").read().strip()
+            if open(f"{p}/idProduct").read().strip() == "2485":
+                # Unbooted OAK always enumerates as USB 2; it re-appears at full speed once a program starts it
+                return Result(G, "depth camera", OK, "OAK-D detected, idle (link speed is checked while it runs)")
             if speed in ("480", "12"):
                 return Result(G, "depth camera", WARN, f"OAK-D on a USB 2 link ({speed} Mbit/s)",
                               "Use a USB 3 port/cable, or depth will lag and drop frames.")
@@ -134,23 +137,17 @@ def mic(cfg):
     return Result(G, "mic array", OK, f"reSpeaker XVF3800 records (card {card})")
 
 
-@check(G, "PRIZM controller")
-def prizm(cfg):
-    d = cfg["devices"]["prizm"]
-    if d.get("usb") and d["usb"] in system.usb_ids():
-        return Result(G, "PRIZM controller", OK, f"connected ({d['port']})")
+@check(G, "unknown serial devices")
+def unknown_serial(cfg):
     unknown = [p.device for p in system.unknown_serial_ports(cfg)]
     if unknown:
-        return Result(G, "PRIZM controller", WARN, f"unidentified serial port(s): {', '.join(unknown)}",
-                      "Possibly the PRIZM. Run `iro prizm find` to identify it.")
-    return Result(G, "PRIZM controller", INFO, "not connected")
+        return Result(G, "unknown serial devices", INFO, ", ".join(unknown) + " (not in config/robot.yaml)")
+    return Result(G, "unknown serial devices", OK, "none")
 
 
-@check(G, "base controller")
+@check(G, "PRIZM Pro")
 def base_controller(cfg):
     d = cfg["devices"]["base_controller"]
     if d["usb"] not in system.usb_ids():
-        return Result(G, "base controller", WARN, "ESP32-S3 not on USB",
-                      "Plug the base controller's USB-C into the Jetson.")
-    return Result(G, "base controller", INFO,
-                  "ESP32-S3 on USB (old PUSAKA motor firmware; its command link is not over USB, see backup/esp32s3/)")
+        return Result(G, "PRIZM Pro", WARN, "not on USB", "Plug the PRIZM Pro's USB into the Jetson and switch it on.")
+    return Result(G, "PRIZM Pro", INFO, "on USB (old PUSAKA motor program; press green START, then `iro prizm ping`)")

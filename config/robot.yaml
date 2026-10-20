@@ -24,13 +24,10 @@ devices:
     usb: "2886:001a"            # reSpeaker XVF3800
     alsa_name: "XVF3800"
   base_controller:
-    # ESP32-S3 running the old PUSAKA motor firmware (see backup/esp32s3/). USB = flashing/logs only.
+    # TETRIX PRIZM Pro = ESP32-S3, running the old PUSAKA motor firmware (backup/esp32s3/).
+    # Waits for the green START button after every reset before it answers.
     usb: "303a:1001"
     port: /dev/base_esp32
-  prizm:
-    # TETRIX PRIZM (Arduino-based). Not yet seen on USB; fill in once plugged in.
-    port: /dev/prizm
-    usb: null
 
 # Where each sensor sits relative to the arm base (base_link), metres and radians.
 # PLACEHOLDERS: measure on the real robot once the body is built.

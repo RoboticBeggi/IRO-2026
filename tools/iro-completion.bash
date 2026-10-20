@@ -10,7 +10,7 @@ _iro() {
             arm) words="scan calibrate off" ;;
             lidar) words="info reset" ;;
             hw) words="snapshot" ;;
-            prizm) words="find backup restore" ;;
+            prizm) words="ping backup restore" ;;
             backup) words="now status log kit verify install" ;;
             up) words="arm lidar camera depth doctor rviz" ;;
         esac

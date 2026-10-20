@@ -23,6 +23,14 @@ Recovered command protocol (text lines, one reply each):
 | `WDT %ld` | `OK WDT` | watchdog timeout (ms); prints `WDT STOP` when it fires |
 | other | `ERR bad <CMD> format`, `ERR unknown command` | |
 
-Uses the I2C master (likely TETRIX motor expansion controllers). The commands
-did NOT answer over USB, nor on the Jetson's /dev/ttyTHS1-2: the command line
-is probably the board's UART pins, wired to something not connected now.
+This board IS the TETRIX PRIZM Pro (Pitsco library "TETRIX ESP32S3 PRIZM PRO
+v1.15"): DC motor chip at I2C 5 and servo chip at 6 on the internal bus
+(Wire1, pins 1/2), expansion controllers at 1-4 on Wire (pins 8/9).
+
+Why it was silent on 20 Oct: PRIZM Pro programs call PrizmBegin(), which waits
+for the green START button before running (and before enabling motors). Press
+START (wheels off the ground), then PING over USB should answer PONG.
+
+Opening the USB port: keep pyserial's defaults (DTR and RTS on). Setting them
+off on open passes through RTS-on/DTR-off, which resets the ESP32-S3 (and the
+program then waits for START again). Tested 20 Oct: default open = no reset.

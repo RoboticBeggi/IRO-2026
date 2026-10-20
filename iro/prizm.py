@@ -1,127 +1,85 @@
-"""iro prizm find | backup | restore <file.hex>
+"""iro prizm ping | backup | restore <flash_full.bin>
 
-The TETRIX PRIZM is Arduino-based: it stores the COMPILED program, not the
-source code. `backup` copies that program (and the EEPROM) off the board, so
-the old behaviour can always be put back with `restore`, and lists the text
-strings inside it (serial commands, messages) that show how it worked.
+The TETRIX PRIZM Pro is an ESP32-S3. It stores the COMPILED program, not the
+source. `backup` copies the whole 8 MB flash (program, settings, files) into
+backup/esp32s3/<date>/ so the board can be put back exactly with `restore`.
+`ping` checks the motor program answers (press the green START button first:
+PRIZM Pro programs wait for it after every reset).
 """
 
-import glob
-import os
 import re
 import subprocess
 import sys
 import time
 
 from iro import ROOT, load_config
-from iro.hw.system import unknown_serial_ports
-
-# (part, programmer, baud): Uno-style boards first (PRIZM is programmed as an Uno), then Mega
-TRY = [("m328p", "arduino", 115200), ("m328p", "arduino", 57600), ("m2560", "wiring", 115200)]
+from iro.hw.system import usb_ids
 
 
-def avrdude():
-    exe = sorted(glob.glob(os.path.expanduser("~/.arduino15/packages/arduino/tools/avrdude/*/bin/avrdude")))
-    if not exe:
-        sys.exit("avrdude missing. Run: iro setup  (installs arduino-cli and the AVR tools)")
-    conf = glob.glob(os.path.join(os.path.dirname(exe[-1]), "..", "etc", "avrdude.conf"))
-    return exe[-1], conf[0] if conf else None
+def port(cfg):
+    import serial.tools.list_ports
+    vid, pid = (int(x, 16) for x in cfg["devices"]["base_controller"]["usb"].split(":"))
+    for p in serial.tools.list_ports.comports():
+        if (p.vid, p.pid) == (vid, pid):
+            return p.device
+    sys.exit("PRIZM Pro not found on USB. Plug in its USB-C and switch it on.")
 
 
-def candidates(cfg):
-    return unknown_serial_ports(cfg)
+def esptool(*args):
+    return subprocess.run([sys.executable, "-m", "esptool", *args], capture_output=True, text=True, timeout=600)
 
 
-def run_avrdude(port, part, prog, baud, *ops):
-    exe, conf = avrdude()
-    cmd = [exe, *(["-C", conf] if conf else []), "-p", part, "-c", prog, "-P", port, "-b", str(baud), "-D", *ops]
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-
-
-def identify(port):
-    """Find which bootloader settings this board answers to. Returns (part, prog, baud, signature)."""
-    for part, prog, baud in TRY:
-        r = run_avrdude(port, part, prog, baud)
-        sig = re.search(r"[Dd]evice signature = (0x[0-9a-fA-F]+)", r.stderr + r.stdout)
-        if r.returncode == 0 and sig:
-            return part, prog, baud, sig.group(1)
-    return None
-
-
-def cmd_find(cfg):
-    ports = candidates(cfg)
-    if not ports:
-        print("No unknown serial device. Is the PRIZM plugged into the Jetson by USB and switched on?")
-        return 1
-    for p in ports:
-        print(f"{p.device}: {p.vid and f'{p.vid:04x}:{p.pid:04x}'} {p.manufacturer or ''} {p.product or ''} serial={p.serial_number}")
-        found = identify(p.device)
-        print(f"  -> {'Arduino-type board: ' + ' '.join(map(str, found)) if found else 'no AVR bootloader answered'}")
-        if found:
-            print(f"  Add to config/robot.yaml under devices.prizm: usb: \"{p.vid:04x}:{p.pid:04x}\"")
-    return 0
-
-
-def strings(data: bytes, min_len=4):
-    return [m.decode() for m in re.findall(rb"[\x20-\x7e]{%d,}" % min_len, data)]
+def cmd_ping(cfg):
+    import serial
+    # Keep pyserial's default DTR=RTS=on: setting them off passes through RTS-on/DTR-off,
+    # which the ESP32-S3 USB port treats as a reset (and the program then waits for START again)
+    s = serial.Serial(port(cfg), 115200, timeout=0.5)
+    s.reset_input_buffer()
+    s.write(b"PING\n")
+    reply = s.read(64).decode(errors="replace").strip()
+    s.close()
+    if "PONG" in reply:
+        print("PONG: motor program running and listening")
+        return 0
+    print(f"No PONG (got {reply!r}). Press the green START button on the PRIZM Pro, then try again.")
+    return 1
 
 
 def cmd_backup(cfg):
-    ports = candidates(cfg)
-    if not ports:
-        print("PRIZM not found. Plug it into the Jetson by USB and switch it on.")
-        return 1
-    port = ports[0].device
-    found = identify(port)
-    if not found:
-        print(f"{port} did not answer as an Arduino bootloader. Press the PRIZM reset button and try again.")
-        return 1
-    part, prog, baud, sig = found
-    out = ROOT / "backup" / "prizm" / time.strftime("%Y%m%d-%H%M")
+    p = port(cfg)
+    out = ROOT / "backup" / "esp32s3" / time.strftime("%Y%m%d-%H%M")
     out.mkdir(parents=True, exist_ok=True)
-    print(f"Reading PRIZM on {port} ({part}, signature {sig}) into {out.relative_to(ROOT)}/ ...")
-    r = run_avrdude(port, part, prog, baud, "-U", f"flash:r:{out}/flash.bin:r", "-U", f"flash:r:{out}/flash.hex:i",
-                    "-U", f"eeprom:r:{out}/eeprom.hex:i")
-    (out / "avrdude.log").write_text(r.stderr)
+    print(f"Reading all 8 MB from the PRIZM Pro on {p} (about 40 s)...")
+    r = esptool("--port", p, "-b", "921600", "read-flash", "0", "ALL", str(out / "flash_full.bin"))
+    (out / "esptool.log").write_text(r.stdout + r.stderr)
     if r.returncode != 0:
-        print("Read failed, see avrdude.log:\n" + r.stderr[-600:])
+        print("Failed, see esptool.log:\n" + (r.stdout + r.stderr)[-600:])
         return 1
-    data = (out / "flash.bin").read_bytes()
-    used = len(data.rstrip(b"\xff"))
-    texts = strings(data)
+    data = (out / "flash_full.bin").read_bytes()
+    texts = [m.decode() for m in re.findall(rb"[\x20-\x7e]{5,}", data[0x10000:0x150000])]
     (out / "strings.txt").write_text("\n".join(texts) + "\n")
-    (out / "info.txt").write_text(f"port {port}\npart {part}\nprogrammer {prog} @ {baud}\nsignature {sig}\n"
-                                  f"program size {used} bytes\nrestore: iro prizm restore {out.relative_to(ROOT)}/flash.hex\n")
-    print(f"Saved: program {used} bytes, EEPROM, {len(texts)} text strings.")
-    print("Text found inside the program (first 40):")
-    for t in texts[:40]:
-        print("   ", t)
-    print("Run `iro backup` to send this to GitHub.")
+    print(f"Saved {len(data) // 1024} KB to {out.relative_to(ROOT)}/. The board was reset: press START to run it.")
+    print("Run `iro backup` to send it to GitHub.")
     return 0
 
 
-def cmd_restore(cfg, hexfile):
-    ports = candidates(cfg)
-    if not ports:
-        print("PRIZM not found.")
+def cmd_restore(cfg, image):
+    p = port(cfg)
+    if input(f"Overwrite the whole PRIZM Pro flash with {image}? Type yes: ").strip() != "yes":
         return 1
-    found = identify(ports[0].device)
-    if not found:
-        print("No bootloader answer. Press reset on the PRIZM and retry.")
-        return 1
-    part, prog, baud, _ = found
-    if input(f"Overwrite the PRIZM program with {hexfile}? Type yes: ").strip() != "yes":
-        return 1
-    r = run_avrdude(ports[0].device, part, prog, baud, "-U", f"flash:w:{hexfile}:i")
-    print(r.stderr[-800:])
+    r = esptool("--port", p, "-b", "921600", "write-flash", "0", image)
+    print((r.stdout + r.stderr)[-800:])
     return r.returncode
 
 
 def main():
-    args = sys.argv[1:] or ["find"]
+    args = sys.argv[1:] or ["ping"]
     cfg = load_config()
-    if args[0] == "find":
-        return cmd_find(cfg)
+    if cfg["devices"]["base_controller"]["usb"] not in usb_ids():
+        print("PRIZM Pro not on USB.")
+        return 1
+    if args[0] == "ping":
+        return cmd_ping(cfg)
     if args[0] == "backup":
         return cmd_backup(cfg)
     if args[0] == "restore" and len(args) == 2:

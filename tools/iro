@@ -35,9 +35,9 @@ DEVICES
   iro lidar               lidar model and health
   iro lidar reset         restart the lidar (clears a latched error)
   iro hw snapshot         save every component's stored settings to backup/
-  iro prizm find          identify the PRIZM on USB
-  iro prizm backup        copy the program off the PRIZM
-  iro prizm restore FILE  put a saved program back on the PRIZM
+  iro prizm ping         is the PRIZM Pro motor program answering? (press green START first)
+  iro prizm backup       copy the PRIZM Pro's whole flash into backup/esp32s3/
+  iro prizm restore FILE put a saved flash image back
 
 ROS 2
   iro up [parts]          start the robot (default: everything plugged in)
