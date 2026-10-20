@@ -74,9 +74,7 @@ case "$cmd" in
         sub="${1:-scan}"; shift || true
         case "$sub" in
             scan) exec python "$ROOT/arm/scan_motors.py" "$@" ;;
-            calibrate)
-                lerobot-calibrate --robot.type=so101_follower --robot.port="$SO101_PORT" --robot.id="$SO101_ID" "$@" \
-                    && python -m iro.doctor full arm && "$ROOT/tools/backup.sh" ;;
+            calibrate) exec python -m iro.calibrate ;;
             off)
                 read -r -p "Torque OFF: the arm will go limp. Holding it? [y/N] " a
                 [ "$a" = y ] && exec python -c "
