@@ -8,3 +8,11 @@ depthai==3.11.0
 # numpy and OpenCV versions are forced in overrides.txt (needed by ROS 2).
 # ESP32-S3 base controller: flash backup / restore
 esptool==5.6.0
+# YOLO (Ultralytics, installed from requirements-nodeps.txt): its other dependencies
+matplotlib>=3.3
+pillow>=7.1.2
+psutil>=5.8
+polars>=0.20
+ultralytics-thop>=2.2.3
+nvidia-ml-py>=12.0
+requests>=2.23

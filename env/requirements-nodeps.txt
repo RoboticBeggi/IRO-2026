@@ -1,0 +1,4 @@
+# Installed with --no-deps after requirements.txt: these declare opencv-python,
+# which would clash with our opencv-python-headless (both provide cv2).
+# Their real dependencies are listed in requirements.txt.
+ultralytics==8.4.183

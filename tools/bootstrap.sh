@@ -50,6 +50,7 @@ export VIRTUAL_ENV="$VENV"
 # does not pull a CPU-only torch from PyPI.
 uv pip install --index-url "$JETSON_INDEX" -r "$ROOT/env/requirements-torch.txt"
 uv pip install -r "$ROOT/env/requirements.txt" --override "$ROOT/env/overrides.txt"
+uv pip install --no-deps -r "$ROOT/env/requirements-nodeps.txt"
 unset VIRTUAL_ENV
 
 echo "== 4/6 Arduino tools for the PRIZM (arduino-cli + avrdude, no sudo)"
