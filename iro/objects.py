@@ -3,6 +3,7 @@
     iro object add wayang      record a new object called "wayang" (arm does the angles)
     iro object list            taught objects and how many pictures each has
     iro object train           train YOLO on all taught objects (~10-20 min on the Jetson)
+    iro object relabel wayang  re-do the boxes of existing pictures with SAM
     iro object remove wayang
 
 How `add` works (no drawing boxes by hand):
@@ -179,25 +180,100 @@ class Detector:
 # --- capture -----------------------------------------------------------------
 
 def capture_poses(arm, cfg):
-    """Camera poses around the look pose: [(xyz, joint angles)]. The joint angles are solved ONCE,
-    from fixed starting points, and replayed exactly: re-solving from wherever the arm happens to
-    be gives a slightly different answer each time (a 16-pixel jump measured on 20 Oct), which
-    breaks the empty-table comparison. Replaying the same angles repeats to < 0.5 pixel."""
+    """Camera poses around the look point: [(xyz, joint angles)], solved ONCE from fixed starting
+    points and replayed exactly (re-solving from wherever the arm happens to be lands a few pixels
+    differently, which breaks the empty-table comparison).
+
+    Variety for training, within what a 5-joint arm can do: it cannot swing round to look at
+    the object from its side (the gripper always points within the vertical plane through the
+    base), so the SIDES come from you turning the object between rounds, and the arm supplies
+    DISTANCE (zoom: 10-24 cm above the table), left/right shifts (+-8 cm) and lean."""
     from iro.motion import SEEDS
     lx, ly = cfg["look_xy"]
     roll = arm.level_roll()
     poses = []
-    for dz in (0.0, 0.02):
-        for dx in (-0.03, 0.0, 0.03):
-            for dy in (-0.04, 0.0, 0.04):
-                xyz = [lx + dx, ly + dy, cfg["look_z"] + dz]
-                for tilt_deg in (cfg["look_tilt_deg"], cfg["look_tilt_deg"] - 10, cfg["look_tilt_deg"] - 20):
-                    q, err = min((arm.kin.ik_down(xyz, np.r_[np.asarray(s)[:4], roll], tilt=np.radians(tilt_deg))
-                                  for s in SEEDS), key=lambda r: r[1])
-                    if err < 0.004:
-                        poses.append((xyz, q))
-                        break
+    for k, height in enumerate((0.10, 0.14, 0.19, 0.24)):
+        for j, dy in enumerate((-0.08, -0.04, 0.0, 0.04, 0.08)):
+            dx = (-0.03, 0.03)[(j + k) % 2] if dy else 0.0     # alternate near/far for more variety
+            xyz = [lx + dx, ly + dy, cfg["table_z"] + height]
+            for lean in (0, -10, -20, -30, -40):
+                tilt = np.radians(cfg["look_tilt_deg"] + lean)
+                q, err = min((arm.kin.ik_down(xyz, np.r_[np.asarray(s)[:4], roll], tilt=tilt) for s in SEEDS),
+                             key=lambda r: r[1])
+                if err < 0.004:
+                    poses.append((xyz, q))
+                    break
     return poses
+
+
+class Refiner:
+    """Tighten a rough box with Segment Anything (MobileSAM, box prompt). The empty-table
+    difference misses parts of an object that look like the table; SAM recovers the whole
+    object and gives a mask (used for copy-paste training images)."""
+
+    def __init__(self):
+        from ultralytics import SAM
+        self.sam = SAM(str(ROOT / "models" / "mobile_sam.pt"))
+
+    def refine(self, frame, box):
+        """(box, mask) or None if SAM's answer does not look like the same object."""
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = box
+        pad = 0.15 * max(x2 - x1, y2 - y1)   # let SAM see all of it even when the rough box was partial
+        prompt = [max(0, x1 - pad), max(0, y1 - pad), min(w, x2 + pad), min(h, y2 + pad)]
+        r = self.sam(frame, bboxes=[prompt], verbose=False)[0]
+        if r.masks is None:
+            return None
+        mask = r.masks.data[0].cpu().numpy().astype(np.uint8)
+        ys, xs = np.nonzero(mask)
+        if len(xs) < 50:
+            return None
+        sb = (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))
+        area = lambda b: max(1, (b[2] - b[0]) * (b[3] - b[1]))     # noqa: E731
+        inter = (max(0, min(x2, sb[2]) - max(x1, sb[0])) * max(0, min(y2, sb[3]) - max(y1, sb[1])))
+        if inter / area(box) < 0.7 or area(sb) > 3 * area(box):   # not the same thing, or spilled onto the table
+            return None
+        return sb, mask
+
+
+def save_label(d, stem, frame, box, mask=None, cls=0):
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = box
+    cv2.imwrite(str(d / "images" / f"{stem}.jpg"), frame)
+    (d / "labels" / f"{stem}.txt").write_text(
+        f"{cls} {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} {(x2 - x1) / w:.6f} {(y2 - y1) / h:.6f}\n")
+    if mask is not None:
+        (d / "masks").mkdir(exist_ok=True)
+        cv2.imwrite(str(d / "masks" / f"{stem}.png"), mask * 255)
+
+
+def read_box(d, stem, shape):
+    h, w = shape[:2]
+    cx, cy, bw, bh = (float(v) for v in (d / "labels" / f"{stem}.txt").read_text().split()[1:5])
+    return (int((cx - bw / 2) * w), int((cy - bh / 2) * h), int((cx + bw / 2) * w), int((cy + bh / 2) * h))
+
+
+def consistency_filter(d, stamp):
+    """Drop labels whose size is far off the other rounds at the SAME pose (the object only turned,
+    so its size there should be similar): catches slivers and boxes that grabbed a shadow."""
+    by_pose = {}
+    for lab in (d / "labels").glob(f"{stamp}_r*_p*.txt"):
+        v = lab.read_text().split()
+        by_pose.setdefault(lab.stem.split("_p")[-1], []).append((lab.stem, float(v[3]) * float(v[4])))
+    dropped = []
+    for items in by_pose.values():
+        if len(items) < 3:
+            continue
+        med = float(np.median([a for _, a in items]))
+        dropped += [stem for stem, a in items if not 0.4 * med <= a <= 2.5 * med]
+    rej = d / "rejected"
+    for stem in dropped:
+        rej.mkdir(exist_ok=True)
+        for sub, ext in (("images", ".jpg"), ("labels", ".txt"), ("masks", ".png")):
+            f = d / sub / f"{stem}{ext}"
+            if f.exists():
+                shutil.move(str(f), str(rej / f.name))
+    return dropped
 
 
 def object_box(frame, background, min_frac=0.002, max_frac=0.4):
@@ -262,6 +338,7 @@ def cmd_add(name, rounds):
     (d / "labels").mkdir(parents=True, exist_ok=True)
     (d / "background").mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    refiner = Refiner()
     cap = open_camera()
     cap.status = f"teaching {name}: moving to the work area"
     kept = 0
@@ -294,7 +371,7 @@ def cmd_add(name, rounds):
                 cap.release()
                 return 1
         print("   empty table recorded; poses repeat exactly.")
-        centre = int(np.argmin([np.linalg.norm(np.subtract(p, [*cfg["look_xy"], cfg["look_z"]])) for p, _ in poses]))
+        centre = int(np.argmin([np.linalg.norm(np.subtract(p, [*cfg["look_xy"], cfg["table_z"] + 0.14])) for p, _ in poses]))
         arm.move_joints_repeatable(poses[centre][1])
 
         def placement(f):   # live: box around whatever differs from the empty table
@@ -328,22 +405,27 @@ def cmd_add(name, rounds):
                 f = grab(cap)
                 box = object_box(f, bgs[i])
                 if box is None or where_hint(box, f.shape):
-                    cap.flash(draw_box(f, box, (0, 0, 255)), f"round {r + 1} picture {i + 1}: skipped (no clean box)")
+                    cap.flash(draw_box(f, box, (0, 0, 255)), f"round {r + 1} picture {i + 1}: object not in view")
                     continue
-                cap.flash(draw_box(f, box, (0, 200, 255), name), f"round {r + 1} picture {i + 1}: labelled")
-                stem = f"{stamp}_r{r}_p{i:02d}"
-                cv2.imwrite(str(d / "images" / f"{stem}.jpg"), f)
-                h, w = f.shape[:2]
-                x1, y1, x2, y2 = box
-                (d / "labels" / f"{stem}.txt").write_text(
-                    f"0 {(x1 + x2) / 2 / w:.6f} {(y1 + y2) / 2 / h:.6f} {(x2 - x1) / w:.6f} {(y2 - y1) / h:.6f}\n")
+                refined = refiner.refine(f, box)
+                if refined is None or where_hint(refined[0], f.shape):
+                    cap.flash(draw_box(f, box, (0, 0, 255)), f"round {r + 1} picture {i + 1}: unsure of the outline")
+                    continue
+                sbox, mask = refined
+                shown = draw_box(f, sbox, (0, 200, 255), name)
+                shown[mask > 0] = (shown[mask > 0] * 0.6 + np.array([0, 120, 0]) * 0.4).astype(np.uint8)
+                cap.flash(shown, f"round {r + 1} picture {i + 1}: labelled")
+                save_label(d, f"{stamp}_r{r}_p{i:02d}", f, sbox, mask)
                 got += 1
             kept += got
             print(f"   round {r + 1}: {got}/{len(poses)} pictures labelled")
         look_at(arm, cfg, cfg["look_xy"])
     cap.release()
+    dropped = consistency_filter(d, stamp)
+    if dropped:
+        print(f"   {len(dropped)} labels looked wrong next to the other rounds (moved to objects/{name}/rejected/)")
     make_sheet(name)
-    print(f"\nSaved {kept} labelled pictures of '{name}' in objects/{name}/.")
+    print(f"\nSaved {kept - len(dropped)} labelled pictures of '{name}' in objects/{name}/.")
     print(f"CHECK the boxes: {SHEET.as_posix().format(name=name)} (each box should hug the object).")
     print("Then: iro object add <another> ... and finally: iro object train")
     return 0
@@ -386,6 +468,83 @@ def cmd_list():
     return 0
 
 
+def cmd_relabel(name):
+    """Re-do the boxes of already-captured pictures with SAM (and save masks)."""
+    d = OBJ_DIR / name
+    refiner = Refiner()
+    ok = bad = 0
+    for img in sorted((d / "images").glob("*.jpg")):
+        f = cv2.imread(str(img))
+        refined = refiner.refine(f, read_box(d, img.stem, f.shape))
+        if refined is None or where_hint(refined[0], f.shape):
+            bad += 1
+            (d / "rejected").mkdir(exist_ok=True)
+            for sub, ext in (("images", ".jpg"), ("labels", ".txt"), ("masks", ".png")):
+                g = d / sub / f"{img.stem}{ext}"
+                if g.exists():
+                    shutil.move(str(g), str(d / "rejected" / g.name))
+            continue
+        save_label(d, img.stem, f, *refined)
+        ok += 1
+    stamps = {p.stem.split("_r")[0] for p in (d / "labels").glob("*.txt")}
+    dropped = sum(len(consistency_filter(d, st)) for st in stamps)
+    make_sheet(name)
+    print(f"{name}: {ok - dropped} pictures relabelled with SAM, {bad + dropped} rejected (in objects/{name}/rejected/). "
+          f"Check: objects/{name}/check.jpg")
+    return 0
+
+
+def synthesize(names, out_img, out_lab, per_object, rng):
+    """Copy-paste training pictures: cut each object out with its SAM mask and paste it, at random
+    size, angle and place (1-3 objects per picture), onto the empty-table photos."""
+    bgs = [p for n in names for p in (OBJ_DIR / n / "background").glob("*.jpg")]
+    cuts = []
+    for cls, n in enumerate(names):
+        for m in sorted((OBJ_DIR / n / "masks").glob("*.png")):
+            img = cv2.imread(str(OBJ_DIR / n / "images" / f"{m.stem}.jpg"))
+            mask = cv2.imread(str(m), 0)
+            if img is None or mask is None:
+                continue
+            ys, xs = np.nonzero(mask)
+            y1, y2, x1, x2 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+            cuts.append((cls, img[y1:y2, x1:x2], mask[y1:y2, x1:x2]))
+    if not bgs or not cuts:
+        return 0
+    made = 0
+    for i in range(per_object * len(names)):
+        bg = cv2.imread(str(bgs[rng.integers(len(bgs))]))
+        h, w = bg.shape[:2]
+        lines = []
+        for _ in range(int(rng.integers(1, 4))):
+            cls, obj, m = cuts[rng.integers(len(cuts))]
+            scale = float(np.sqrt(rng.uniform(0.01, 0.12) * h * w / (obj.shape[0] * obj.shape[1])))
+            angle = float(rng.uniform(0, 360))
+            oh, ow = obj.shape[:2]
+            M = cv2.getRotationMatrix2D((ow / 2, oh / 2), angle, scale)
+            cos, sin = abs(M[0, 0]), abs(M[0, 1])
+            nw, nh = int(oh * sin + ow * cos) + 1, int(oh * cos + ow * sin) + 1
+            if nw >= w - 4 or nh >= h - 4:
+                continue
+            M[0, 2] += nw / 2 - ow / 2
+            M[1, 2] += nh / 2 - oh / 2
+            o = cv2.warpAffine(obj, M, (nw, nh))
+            a = cv2.warpAffine(m, M, (nw, nh)).astype(np.float32) / 255
+            a = cv2.GaussianBlur(a, (5, 5), 0)[..., None]          # soft edge, no cut-out halo
+            x, y = int(rng.integers(0, w - nw)), int(rng.integers(0, h - nh))
+            bright = rng.uniform(0.8, 1.2)                          # lighting differences
+            region = bg[y:y + nh, x:x + nw].astype(np.float32)
+            bg[y:y + nh, x:x + nw] = np.clip(region * (1 - a) + o.astype(np.float32) * bright * a, 0, 255).astype(np.uint8)
+            ys, xs = np.nonzero(a[..., 0] > 0.5)
+            if len(xs):
+                bx1, by1, bx2, by2 = x + xs.min(), y + ys.min(), x + xs.max(), y + ys.max()
+                lines.append(f"{cls} {(bx1 + bx2) / 2 / w:.6f} {(by1 + by2) / 2 / h:.6f} {(bx2 - bx1) / w:.6f} {(by2 - by1) / h:.6f}")
+        if lines:
+            cv2.imwrite(str(out_img / f"synth_{i:05d}.jpg"), bg)
+            (out_lab / f"synth_{i:05d}.txt").write_text("\n".join(lines) + "\n")
+            made += 1
+    return made
+
+
 def cmd_train(epochs):
     from ultralytics import YOLO
     names = taught()
@@ -398,31 +557,41 @@ def cmd_train(epochs):
     for split in ("train", "val"):
         (work / split / "images").mkdir(parents=True)
         (work / split / "labels").mkdir(parents=True)
-    count = {}
+    count, n_train = {}, 0
     for cls, n in enumerate(names):
         imgs = sorted((OBJ_DIR / n / "images").glob("*.jpg"))
         count[n] = len(imgs)
+        # Hold out whole ROUNDS for validation (the object in an orientation never trained on):
+        # random frames would put near-identical neighbours in both sets and flatter the score.
+        rounds = sorted({p.stem.rsplit("_p", 1)[0] for p in imgs})
+        held = set(rounds[-1:]) if len(rounds) > 1 else set()
         for img in imgs:
-            split = "val" if rng.random() < 0.15 else "train"
+            split = "val" if img.stem.rsplit("_p", 1)[0] in held or (not held and rng.random() < 0.15) else "train"
+            n_train += split == "train"
             shutil.copy(img, work / split / "images" / img.name)
             lab = (OBJ_DIR / n / "labels" / f"{img.stem}.txt").read_text().split()
             (work / split / "labels" / f"{img.stem}.txt").write_text(" ".join([str(cls)] + lab[1:]) + "\n")
-        # empty-table pictures: teach it what is NOT an object
-        for bg in sorted((OBJ_DIR / n / "background").glob("*.jpg")):
-            shutil.copy(bg, work / "train" / "images" / f"bg_{n}_{bg.name}")
-            (work / "train" / "labels" / f"bg_{n}_{bg.stem}.txt").write_text("")
+    synth = synthesize(names, work / "train" / "images", work / "train" / "labels", per_object=150, rng=rng)
+    # Empty-table pictures teach "this is not an object"; about 10% of the training set is right
+    bgs = [p for n in names for p in sorted((OBJ_DIR / n / "background").glob("*.jpg"))]
+    for bg in [bgs[i] for i in rng.permutation(len(bgs))[: max(1, (n_train + synth) // 10)]] if bgs else []:
+        shutil.copy(bg, work / "train" / "images" / f"bg_{bg.parent.parent.name}_{bg.name}")
+        (work / "train" / "labels" / f"bg_{bg.parent.parent.name}_{bg.stem}.txt").write_text("")
     (work / "data.yaml").write_text(f"path: {work}\ntrain: train/images\nval: val/images\nnames: {json.dumps(names)}\n")
-    print(f"Training on {count} (+ empty-table pictures). About 10-20 minutes; the robot can't use the GPU meanwhile.")
+    print(f"Training on {count} real pictures + {synth} copy-paste pictures. About 15-30 minutes; "
+          "the robot can't use the GPU meanwhile.")
     model = YOLO(str(STOCK_MODEL))
     model.train(data=str(work / "data.yaml"), epochs=epochs, imgsz=640, batch=8, workers=2, device=0,
-                patience=15, project=str(work / "runs"), name="train", exist_ok=True, verbose=False, plots=False)
+                patience=20, project=str(work / "runs"), name="train", exist_ok=True, verbose=False, plots=False,
+                # black-and-white camera: no colour jitter, but light changes; objects at any angle/size
+                hsv_h=0.0, hsv_s=0.0, hsv_v=0.4, degrees=15, scale=0.5, fliplr=0.5, mosaic=1.0, close_mosaic=10)
     best = work / "runs" / "train" / "weights" / "best.pt"
     OBJ_MODEL.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(best, OBJ_MODEL)
     (OBJ_DIR / "model" / "names.json").write_text(json.dumps(names))
     metrics = YOLO(str(OBJ_MODEL)).val(data=str(work / "data.yaml"), device=0, verbose=False, plots=False)
-    print(f"\nDone: objects/model/objects.pt knows {names}. Detection quality (mAP50) {metrics.box.map50:.2f} "
-          "(1.0 = perfect, above 0.8 is good). Try it: iro vision")
+    print(f"\nDone: objects/model/objects.pt knows {names}. Score on the held-out turn of each object "
+          f"(mAP50): {metrics.box.map50:.2f}  (1.0 = perfect, above 0.8 is good). Try it: iro vision")
     return 0
 
 
@@ -436,6 +605,8 @@ def main():
         return cmd_add(a[1], rounds)
     if a[0] == "list":
         return cmd_list()
+    if a[0] == "relabel" and len(a) == 2:
+        return cmd_relabel(a[1])
     if a[0] == "train":
         return cmd_train(int(a[a.index("--epochs") + 1]) if "--epochs" in a else 60)
     if a[0] == "remove" and len(a) == 2:
