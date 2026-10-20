@@ -79,10 +79,9 @@ def setup(context):
         if auto and not plugged_in(dev["arm_camera"]):
             skip("camera", "not on USB")
         else:
-            actions.append(Node(package="v4l2_camera", executable="v4l2_camera_node", namespace="arm_camera",
-                                output="screen", parameters=[{"video_device": dev["arm_camera"]["device"],
-                                                              "image_size": [640, 480],
-                                                              "camera_frame_id": "wrist_camera_link"}]))
+            # Own OpenCV node: this camera only offers MJPG, which v4l2_camera cannot decode
+            actions.append(Node(package="iro_ros", executable="camera_node", namespace="arm_camera",
+                                output="screen"))
 
     if "depth" in parts:
         if auto and not plugged_in(dev["depth_camera"]):

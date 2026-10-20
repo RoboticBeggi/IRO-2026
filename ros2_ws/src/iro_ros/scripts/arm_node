@@ -1,0 +1,5 @@
+#!/usr/bin/env python3
+# Launcher that runs with the active Python (our venv via env.sh), so LeRobot is importable.
+from iro_ros.arm_node import main
+
+main()
