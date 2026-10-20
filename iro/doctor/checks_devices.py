@@ -139,10 +139,18 @@ def prizm(cfg):
     d = cfg["devices"]["prizm"]
     if d.get("usb") and d["usb"] in system.usb_ids():
         return Result(G, "PRIZM controller", OK, f"connected ({d['port']})")
-    unknown_serial = [p for p in os.listdir("/dev") if p.startswith(("ttyUSB", "ttyACM"))
-                      and os.path.realpath(f"/dev/{p}") not in {os.path.realpath(cfg["devices"][k]["port"]) for k in ("arm", "lidar")}]
-    if unknown_serial:
-        return Result(G, "PRIZM controller", WARN, f"unidentified serial port(s): {', '.join(unknown_serial)}",
-                      "Probably the PRIZM. Run `iro prizm find` to identify it.")
-    return Result(G, "PRIZM controller", WARN, "not connected",
-                  "Connect the PRIZM to the Jetson with USB and switch it on. Drive base and battery checks need it.")
+    unknown = [p.device for p in system.unknown_serial_ports(cfg)]
+    if unknown:
+        return Result(G, "PRIZM controller", WARN, f"unidentified serial port(s): {', '.join(unknown)}",
+                      "Possibly the PRIZM. Run `iro prizm find` to identify it.")
+    return Result(G, "PRIZM controller", INFO, "not connected")
+
+
+@check(G, "base controller")
+def base_controller(cfg):
+    d = cfg["devices"]["base_controller"]
+    if d["usb"] not in system.usb_ids():
+        return Result(G, "base controller", WARN, "ESP32-S3 not on USB",
+                      "Plug the base controller's USB-C into the Jetson.")
+    return Result(G, "base controller", INFO,
+                  "ESP32-S3 on USB (old PUSAKA motor firmware; its command link is not over USB, see backup/esp32s3/)")

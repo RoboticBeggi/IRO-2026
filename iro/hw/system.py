@@ -17,6 +17,24 @@ def usb_ids() -> set[str]:
     return ids
 
 
+def configured_usb_ids(cfg: dict) -> set[str]:
+    """USB ids of every device listed in config/robot.yaml."""
+    ids = set()
+    for dev in cfg["devices"].values():
+        usb = dev.get("usb")
+        ids.update([usb] if isinstance(usb, str) else usb or [])
+    return ids
+
+
+def unknown_serial_ports(cfg: dict) -> list:
+    """Serial ports (pyserial ListPortInfo) that belong to no configured device."""
+    import serial.tools.list_ports
+    known = configured_usb_ids(cfg)
+    return [p for p in serial.tools.list_ports.comports()
+            if p.device.startswith(("/dev/ttyUSB", "/dev/ttyACM"))
+            and not (p.vid and f"{p.vid:04x}:{p.pid:04x}" in known)]
+
+
 def users_of(path: str) -> list[tuple[int, str]]:
     """Processes that have `path` open, as (pid, command name)."""
     target = os.path.realpath(path)

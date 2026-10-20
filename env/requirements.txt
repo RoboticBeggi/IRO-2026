@@ -6,3 +6,5 @@ nvidia-cudss-cu12==0.8.0.10
 # OAK-D depth camera (doctor, hardware snapshot)
 depthai==3.11.0
 # numpy and OpenCV versions are forced in overrides.txt (needed by ROS 2).
+# ESP32-S3 base controller: flash backup / restore
+esptool==5.6.0

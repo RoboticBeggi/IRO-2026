@@ -13,9 +13,8 @@ import subprocess
 import sys
 import time
 
-import serial.tools.list_ports
-
 from iro import ROOT, load_config
+from iro.hw.system import unknown_serial_ports
 
 # (part, programmer, baud): Uno-style boards first (PRIZM is programmed as an Uno), then Mega
 TRY = [("m328p", "arduino", 115200), ("m328p", "arduino", 57600), ("m2560", "wiring", 115200)]
@@ -29,14 +28,8 @@ def avrdude():
     return exe[-1], conf[0] if conf else None
 
 
-def known_ports(cfg):
-    return {os.path.realpath(cfg["devices"][k]["port"]) for k in ("arm", "lidar") if os.path.exists(cfg["devices"][k]["port"])}
-
-
 def candidates(cfg):
-    taken = known_ports(cfg)
-    return [p for p in serial.tools.list_ports.comports()
-            if os.path.realpath(p.device) not in taken and p.device.startswith(("/dev/ttyUSB", "/dev/ttyACM"))]
+    return unknown_serial_ports(cfg)
 
 
 def run_avrdude(port, part, prog, baud, *ops):
