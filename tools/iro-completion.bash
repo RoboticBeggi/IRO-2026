@@ -7,7 +7,7 @@ _iro() {
     else
         case "$prev" in
             doctor) words="full quick watch jetson devices arm backup --json" ;;
-            arm) words="scan calibrate check zero off" ;;
+            arm) words="scan calibrate check align zero off" ;;
             pick) words="look teach bottle cup --dry-run --drop" ;;
             lidar) words="info reset" ;;
             hw) words="snapshot" ;;

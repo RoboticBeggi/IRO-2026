@@ -37,6 +37,9 @@ class ArmNode(Node):
         self._bus_cm = open_bus(self.get_parameter("port").value, arm["servo_ids"])
         self.bus = self._bus_cm.__enter__()
         self.names = list(self.bus.motors)
+        # Live-adjustable zero offsets (degrees, in self.names order), used by `iro arm align`
+        self.declare_parameter("joint_offsets_deg", [math.degrees(self.offsets.get(n, 0.0)) for n in self.names])
+        self.add_on_set_parameters_callback(self.on_params)
 
         self.js_pub = self.create_publisher(JointState, "/joint_states", 10)
         self.diag_pub = self.create_publisher(DiagnosticArray, "/diagnostics", 10)
@@ -44,6 +47,15 @@ class ArmNode(Node):
         self.create_timer(1.0 / self.get_parameter("rate_hz").value, self.publish_joints)
         self.create_timer(1.0, self.publish_health)
         self.get_logger().info(f"arm ready on {self.get_parameter('port').value}, {len(self.names)} servos")
+
+    def on_params(self, params):
+        from rcl_interfaces.msg import SetParametersResult
+        for p in params:
+            if p.name == "joint_offsets_deg":
+                if len(p.value) != len(self.names):
+                    return SetParametersResult(successful=False, reason=f"need {len(self.names)} values")
+                self.offsets = {n: math.radians(v) for n, v in zip(self.names, p.value)}
+        return SetParametersResult(successful=True)
 
     def publish_joints(self):
         try:

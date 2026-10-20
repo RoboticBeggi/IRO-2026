@@ -17,7 +17,7 @@ import yaml
 
 from iro import ROOT, load_config
 from iro.hw.servos import open_bus
-from iro.kinematics import JOINTS, TIP, Kinematics
+from iro.kinematics import JOINTS, Kinematics
 
 TICKS = 4096
 MIN_MOVE = 150   # raw ticks (~13 deg): smaller moves are too ambiguous
