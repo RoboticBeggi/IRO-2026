@@ -18,7 +18,6 @@ How a pick works (no camera calibration needed):
 
 import argparse
 import sys
-import time
 from pathlib import Path
 
 import cv2
