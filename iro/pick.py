@@ -32,6 +32,14 @@ TAUGHT = ROOT / "config" / "pick_taught.yaml"   # written by `iro pick teach`, o
 SNAP = Path.home() / "iro-pick-last.jpg"
 
 
+def save_taught(values: dict):
+    """Merge into config/pick_taught.yaml (never drop what other tools taught)."""
+    data = yaml.safe_load(TAUGHT.read_text()) if TAUGHT.exists() else {}
+    data.update(values)
+    TAUGHT.write_text("# Written by iro pick teach / iro arm check / iro arm zero; overrides `pick:` in robot.yaml\n"
+                      + yaml.safe_dump(data))
+
+
 def pick_config() -> dict:
     cfg = load_config()["pick"]
     if TAUGHT.exists():
@@ -80,6 +88,14 @@ class Eye:
         if near is not None:
             return min(found, key=lambda d: np.linalg.norm(d[2] - near))
         return max(found, key=lambda d: d[1])
+
+    def everything(self, conf=0.15):
+        """All YOLO detections (any of the 80 classes), best first: [(name, conf, (u, v))]."""
+        r = self.model.predict(self.frame(), device=0, verbose=False, conf=conf)[0]
+        cv2.imwrite(str(SNAP), r.plot())
+        out = [(r.names[int(c)], float(p), np.array([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]))
+               for b, c, p in zip(r.boxes.xyxy.cpu().numpy(), r.boxes.cls, r.boxes.conf)]
+        return sorted(out, key=lambda d: -d[1])
 
     def grasp_pixel(self):
         gp = self.cfg.get("grasp_pixel")
@@ -168,13 +184,17 @@ def do_pick(args, cfg):
 
 
 def do_look(args, cfg):
+    """Look pose, then live: what does YOLO see? Use it to choose objects before teaching."""
     eye = Eye(cfg)
     with Arm(dry_run=args.dry_run) as arm:
         look_at(arm, cfg, cfg["look_xy"])
-        d = eye.detect(args.object)
-    print(f"Saw: {d[0]} ({d[1]:.2f}) at pixel {np.round(d[2])}" if d else "Saw none of the pick classes.")
-    print(f"Image with all detections: {SNAP}")
-    return 0
+        while True:
+            seen = eye.everything()
+            ok = [d for d in seen if d[0] in cfg["classes"] and d[1] >= cfg["min_conf"]]
+            print("YOLO sees: " + (", ".join(f"{n} {c:.2f}" for n, c, _ in seen[:8]) or "nothing")
+                  + (f"   -> can pick: {ok[0][0]}" if ok else "   -> nothing pickable"))
+            if input(f"(image: {SNAP})  Enter = look again, q = quit: ").strip().lower() == "q":
+                return 0
 
 
 def do_teach(args, cfg):
@@ -206,19 +226,31 @@ def do_teach(args, cfg):
             print("   Either a joint counts the wrong way (run `iro arm check`), or the gripper was not pointing "
                   "straight down. Nothing saved.")
             return 1
-        print(f"   grasp_z = {taught['grasp_z']}. Holding. Opening and rising to the look pose above it...")
+        save_taught(taught)   # heights are good: keep them even if the camera step fails
+        print(f"   grasp_z = {taught['grasp_z']} (saved). Holding. Opening and rising to the look pose above it...")
         arm.pick["table_z"] = taught["table_z"]
         arm.gripper(open=True)
         arm.move_tip([tip[0], tip[1], min(tip[2] + 0.04, cfg["lift_z"])], duration=2.0)
         look_at(arm, cfg, tip[:2])
-        d = eye.detect()
-        if d is None:
-            print(f"   YOLO cannot see the object from above (image: {SNAP}). Try a COCO object like a bottle or cup.")
-            return 1
+        want = None
+        while True:
+            d = eye.detect(want)
+            if d is not None:
+                break
+            seen = eye.everything()
+            print(f"   YOLO does not see a pick object ({want or ', '.join(cfg['classes'])}). Image: {SNAP}")
+            print("   It does see: " + (", ".join(f"{n} {c:.2f} at {np.round(p)}" for n, c, p in seen[:6]) or "nothing"))
+            a = input("   Do NOT move the object. Enter = look again, a class name (e.g. 'book') = use that, "
+                      "q = stop (heights stay saved): ").strip()
+            if a.lower() == "q":
+                return 1
+            if a:
+                want = a
+                eye.cfg = dict(eye.cfg, min_conf=0.15)
         taught["grasp_pixel"] = [round(float(d[2][0]), 1), round(float(d[2][1]), 1)]
         print(f"   {d[0]} seen at pixel {taught['grasp_pixel']}: that is 'straight under the gripper'.")
-    TAUGHT.write_text("# Written by `iro pick teach`; overrides `pick:` in robot.yaml\n" + yaml.safe_dump(taught))
-    print(f"Saved to {TAUGHT.relative_to(ROOT)}. Back it up: iro backup")
+    save_taught(taught)
+    print(f"Saved to {TAUGHT.relative_to(ROOT)}. Next: iro pick --dry-run")
     return 0
 
 
