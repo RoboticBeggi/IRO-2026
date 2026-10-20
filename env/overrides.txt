@@ -1,0 +1,8 @@
+# Forced versions that win over what packages declare (uv pip install --override).
+# ROS 2 Humble's message libraries are built for numpy 1.x and fail to load
+# under numpy 2, and our ROS nodes run in this environment. OpenCV 4.11+
+# requires numpy 2, so it is held at 4.10 (LeRobot allows >=4.9).
+# Known, accepted: rerun-sdk (LeRobot's live viewer for teleop and dataset
+# recording, which we do not use) declares numpy>=2; it still imports.
+numpy<2
+opencv-python-headless<4.11

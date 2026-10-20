@@ -5,10 +5,4 @@ lerobot[feetech]==0.4.4
 nvidia-cudss-cu12==0.8.0.10
 # OAK-D depth camera (doctor, hardware snapshot)
 depthai==3.11.0
-# ROS 2 Humble's message libraries are built for numpy 1.x and fail to load
-# under numpy 2, and our ROS nodes run in this environment. OpenCV 4.11+
-# requires numpy 2, so hold it at 4.10 (LeRobot allows >=4.9).
-# Known, accepted conflict: rerun-sdk (LeRobot's live viewer for teleop and
-# dataset recording, which we do not use) declares numpy>=2.
-numpy<2
-opencv-python-headless<4.11
+# numpy and OpenCV versions are forced in overrides.txt (needed by ROS 2).

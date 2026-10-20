@@ -49,7 +49,7 @@ export VIRTUAL_ENV="$VENV"
 # CUDA torch for Jetson first, from NVIDIA's Jetson AI Lab index, so LeRobot
 # does not pull a CPU-only torch from PyPI.
 uv pip install --index-url "$JETSON_INDEX" -r "$ROOT/env/requirements-torch.txt"
-uv pip install -r "$ROOT/env/requirements.txt"
+uv pip install -r "$ROOT/env/requirements.txt" --override "$ROOT/env/overrides.txt"
 unset VIRTUAL_ENV
 
 echo "== 4/6 Arduino tools for the PRIZM (arduino-cli + avrdude, no sudo)"
