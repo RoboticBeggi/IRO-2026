@@ -41,6 +41,7 @@ class Arm:
         self.pick = cfg["pick"]
         self.lim = cfg["limits"]["servos"]
         self.signs = self.dev.get("joint_signs", {})
+        self.offsets = {j: np.radians(v) for j, v in self.dev.get("joint_offsets_deg", {}).items()}
         self.max_speed = max_speed or self.pick["max_joint_speed"]
         self.dry_run = dry_run
         self.kin = Kinematics()
@@ -53,10 +54,11 @@ class Arm:
 
     # --- units ---------------------------------------------------------------
     def to_raw(self, name, rad):
+        rad = rad - self.offsets.get(name, 0.0)
         return int(round(TICKS / 2 + self.signs.get(name, 1) * rad * TICKS / (2 * np.pi)))
 
     def to_rad(self, name, raw):
-        return self.signs.get(name, 1) * (raw - TICKS / 2) * 2 * np.pi / TICKS
+        return self.signs.get(name, 1) * (raw - TICKS / 2) * 2 * np.pi / TICKS + self.offsets.get(name, 0.0)
 
     # --- connection ----------------------------------------------------------
     def __enter__(self):

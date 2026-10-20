@@ -1,0 +1,3 @@
+# Written by `iro pick teach` / `iro arm check`; overrides `pick:` in robot.yaml
+gripper_closed_pct: 1
+gripper_open_pct: 79

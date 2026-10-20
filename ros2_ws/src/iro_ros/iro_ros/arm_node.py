@@ -30,6 +30,7 @@ class ArmNode(Node):
         arm = cfg["devices"]["arm"]
         self.lim = cfg["limits"]["servos"]
         self.signs = arm.get("joint_signs", {})
+        self.offsets = {j: math.radians(v) for j, v in arm.get("joint_offsets_deg", {}).items()}
         self.declare_parameter("rate_hz", 30.0)
         self.declare_parameter("port", arm["port"])
 
@@ -53,7 +54,8 @@ class ArmNode(Node):
         msg = JointState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.name = self.names
-        msg.position = [self.signs.get(n, 1) * (raw[n] - TICKS / 2) * 2 * math.pi / TICKS for n in self.names]
+        msg.position = [self.signs.get(n, 1) * (raw[n] - TICKS / 2) * 2 * math.pi / TICKS + self.offsets.get(n, 0.0)
+                        for n in self.names]
         self.js_pub.publish(msg)
 
     def publish_health(self):

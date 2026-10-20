@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1cabac2b-8711-4426-81e7-373cd5327053
-  modified: 2026-10-20T03:44:40.043Z
+  modified: 2026-10-20T04:10:10.447Z
 ---
 
 Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname `ubuntu`, MAXN_SUPER.
@@ -16,6 +16,7 @@ Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname 
 - Gotchas: ROS python nodes must be plain scripts with `#!/usr/bin/env python3` (console_scripts get /usr/bin/python3, no venv). Wrist cam is MJPG-only → v4l2_camera can't use it. rclpy Image.data must be array('B') (plain bytes = 149 ms/frame).
 - Open problem: 20 Oct calibration has no limits on elbow_flex, wrist_flex (range 0-4095); user must recalibrate. iro.motion refuses to move until then.
 - TETRIX PRIZM Pro = ESP32-S3 (303a:1001). Holds old PUSAKA base firmware (text protocol PING/MOVE vx vy wz/RAW/MOTOR/ENC/WDT, dump in backup/esp32s3/). Programs wait for green START after reset. Open its USB port with pyserial defaults (DTR/RTS on); setting them off resets the board.
+- Arm recalibrated 20 Oct 12:00 (good, no wrap). Arm base mounted ~4 cm above the table on the robot body; URDF base_link origin = bottom of arm base, so table_z should be about -0.04. First teach gave table -7.1 cm / grasp below table → suspect reversed joint_signs; `iro arm check` wizard written to measure them.
 - Arm pick pipeline (iro/kinematics.py, iro/motion.py, iro/pick.py; `iro pick`): YOLO11n 30 fps on mono wrist cam; FK matches ROS TF exactly. SO-101 can point straight down only up to ~8 cm (wrist limit 95 deg); look pose leans 25 deg outward at 12 cm. Visual servoing with runtime image Jacobian; `iro pick teach` sets table_z/grasp_z/grasp_pixel. Not yet run on hardware (waits for recalibration).
 - Old lost project was named PUSAKA; see repo salvage/README.md.
 

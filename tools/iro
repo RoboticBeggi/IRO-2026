@@ -30,6 +30,7 @@ ARM (SO-ARM101)
   iro arm scan            are all 6 servos there? temps, volts (read-only)
   iro arm calibrate       fresh LeRobot calibration, checked, then backed up
   iro arm check           which way each joint counts (move each one by hand)
+  iro arm zero            fix each joint's zero error by touching the table ~8 times
   iro arm off             torque off on all servos (HOLD THE ARM, it goes limp)
   iro pick [object]       find an object with YOLO and pick it up (--dry-run, --drop)
   iro pick look           go to the look pose, show what YOLO sees
@@ -76,6 +77,7 @@ case "$cmd" in
         case "$sub" in
             scan) exec python "$ROOT/arm/scan_motors.py" "$@" ;;
             check) exec python -m iro.signcheck ;;
+            zero) exec python -m iro.zerocal ;;
             calibrate) exec python -m iro.calibrate ;;
             off)
                 read -r -p "Torque OFF: the arm will go limp. Holding it? [y/N] " a
@@ -83,7 +85,7 @@ case "$cmd" in
 from iro import load_config; from iro.hw.servos import open_bus
 d=load_config()['devices']['arm']
 with open_bus(d['port'], d['servo_ids']) as b: b.disable_torque(); print('torque off')" ;;
-            *) die "unknown: iro arm $sub (scan | calibrate | check | off)" ;;
+            *) die "unknown: iro arm $sub (scan | calibrate | check | zero | off)" ;;
         esac ;;
 
     lidar)
