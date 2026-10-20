@@ -78,6 +78,16 @@ class Camera:
         self.feed.show(img, text)
         self.hold_until = time.time() + seconds
 
+    def lock_exposure(self):
+        """Fix exposure at its current value: auto-exposure re-adjusts when someone moves nearby,
+        which changes the whole picture and spoils the empty-table comparison."""
+        with self.lock:
+            exp = self.cap.get(cv2.CAP_PROP_EXPOSURE)
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)   # V4L2: 1 = manual, 3 = auto
+            self.cap.set(cv2.CAP_PROP_EXPOSURE, exp)
+            self.exposure_locked = self.cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) == 1
+        return self.exposure_locked
+
     def read(self):
         with self.lock:
             return self.cap.read()
@@ -86,6 +96,8 @@ class Camera:
         self.running = False
         time.sleep(0.1)
         with self.lock:
+            if getattr(self, "exposure_locked", False):
+                self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)   # back to auto for everyone else
             self.cap.release()
 
 
@@ -156,18 +168,23 @@ class Detector:
 # --- capture -----------------------------------------------------------------
 
 def capture_poses(arm, cfg):
-    """Camera poses around the look pose that the arm can actually reach (same list every time)."""
+    """Camera poses around the look pose: [(xyz, joint angles)]. The joint angles are solved ONCE,
+    from fixed starting points, and replayed exactly: re-solving from wherever the arm happens to
+    be gives a slightly different answer each time (a 16-pixel jump measured on 20 Oct), which
+    breaks the empty-table comparison. Replaying the same angles repeats to < 0.5 pixel."""
     from iro.motion import SEEDS
     lx, ly = cfg["look_xy"]
+    tilt = np.radians(cfg["look_tilt_deg"])
+    roll = arm.level_roll()
     poses = []
     for dz in (0.0, 0.02):
         for dx in (-0.03, 0.0, 0.03):
             for dy in (-0.04, 0.0, 0.04):
                 xyz = [lx + dx, ly + dy, cfg["look_z"] + dz]
-                q, err = min((arm.kin.ik_down(xyz, s, tilt=np.radians(cfg["look_tilt_deg"])) for s in SEEDS),
+                q, err = min((arm.kin.ik_down(xyz, np.r_[np.asarray(s)[:4], roll], tilt=tilt) for s in SEEDS),
                              key=lambda r: r[1])
                 if err < 0.004:
-                    poses.append(xyz)
+                    poses.append((xyz, q))
     return poses
 
 
@@ -175,6 +192,12 @@ def object_box(frame, background, min_frac=0.002, max_frac=0.4):
     """Bounding box of what differs from the empty-table picture, or None."""
     a = cv2.GaussianBlur(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), (7, 7), 0)
     b = cv2.GaussianBlur(cv2.cvtColor(background, cv2.COLOR_BGR2GRAY), (7, 7), 0)
+    # Line the photo up with the empty-table photo first: the arm repeats to a few pixels, and
+    # on a patterned table even that would show up as fake edges.
+    (dx, dy), _ = cv2.phaseCorrelate(np.float32(b), np.float32(a))
+    if 0.3 < np.hypot(dx, dy) < 25:
+        a = cv2.warpAffine(a, np.float32([[1, 0, -dx], [0, 1, -dy]]), (a.shape[1], a.shape[0]),
+                           borderMode=cv2.BORDER_REPLICATE)
     diff = cv2.absdiff(a, b)
     thr = max(25, int(np.percentile(diff, 99) * 0.5))
     mask = (diff > thr).astype(np.uint8) * 255
@@ -228,9 +251,10 @@ def cmd_add(name, rounds):
         cap.status = "STEP 1: clear the work area, then press Enter"
         input("\n1. CLEAR the work area under the camera (nothing there, hands away). Enter. ")
         bgs = []
-        for i, xyz in enumerate(poses):
+        cap.lock_exposure()
+        for i, (_, q) in enumerate(poses):
             cap.status = f"recording the empty table {i + 1}/{len(poses)}"
-            arm.move_tip(xyz, tilt=np.radians(cfg["look_tilt_deg"]))
+            arm.move_joints_repeatable(q)
             time.sleep(0.4)
             bg = grab(cap, n=3)
             bgs.append(bg)
@@ -238,8 +262,8 @@ def cmd_add(name, rounds):
         # Repeatability check: back to two poses; the empty table must still match its picture,
         # or every label would be garbage (arm not returning to the same pose, or light changing)
         for i in (0, len(poses) // 2):
-            arm.move_tip(poses[-1 - i], tilt=np.radians(cfg["look_tilt_deg"]))
-            arm.move_tip(poses[i], tilt=np.radians(cfg["look_tilt_deg"]))
+            arm.move_joints_repeatable(poses[-1 - i][1])
+            arm.move_joints_repeatable(poses[i][1])
             time.sleep(0.4)
             if object_box(grab(cap, n=3), bgs[i]) is not None:
                 cap.status = "STOPPED: empty table changed (light or arm) - see terminal"
@@ -249,8 +273,8 @@ def cmd_add(name, rounds):
                 cap.release()
                 return 1
         print("   empty table recorded; poses repeat exactly.")
-        centre = int(np.argmin([np.linalg.norm(np.subtract(p, [*cfg["look_xy"], cfg["look_z"]])) for p in poses]))
-        arm.move_tip(poses[centre], tilt=np.radians(cfg["look_tilt_deg"]))
+        centre = int(np.argmin([np.linalg.norm(np.subtract(p, [*cfg["look_xy"], cfg["look_z"]])) for p, _ in poses]))
+        arm.move_joints_repeatable(poses[centre][1])
 
         def placement(f):   # live: box around whatever differs from the empty table
             box = object_box(f, bgs[centre])
@@ -275,8 +299,9 @@ def cmd_add(name, rounds):
                 input(f"\n   Round {r + 1}/{rounds}: turn the {name} a quarter turn (or onto another side), "
                       "same spot, hands away. Enter. ")
             got = 0
-            for i, xyz in enumerate(poses):
-                arm.move_tip(xyz, tilt=np.radians(cfg["look_tilt_deg"]))
+            arm.move_joints_repeatable(poses[centre][1])   # every round starts from the same pose
+            for i, (_, q) in enumerate(poses):
+                arm.move_joints_repeatable(q)
                 time.sleep(0.4)
                 cap.status = f"round {r + 1}/{rounds}, picture {i + 1}/{len(poses)}"
                 f = grab(cap)

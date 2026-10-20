@@ -110,13 +110,25 @@ class Arm:
                                   f"{floor * 100:.1f} cm (table_z + clearance in config/robot.yaml)")
 
     def _check_servos(self):
-        st = self.bus.sync_read("Status", normalize=False)
-        temp = self.bus.sync_read("Present_Temperature", normalize=False)
-        for j in st:
-            if st[j]:
-                raise MotionError(f"{j} servo reports {', '.join(decode_status(st[j]))}")
-            if temp[j] >= self.lim["temp_fail_c"]:
-                raise MotionError(f"{j} at {temp[j]} C: too hot to keep moving")
+        """Stop on a servo error or overheating, but only if a second read agrees: a garbled
+        packet once reported 66 C on a servo that was really at 38 C (20 Oct)."""
+        def bad():
+            st = self.bus.sync_read("Status", normalize=False)
+            temp = self.bus.sync_read("Present_Temperature", normalize=False)
+            out = {}
+            for j in st:
+                if st[j]:
+                    out[j] = f"{j} servo reports {', '.join(decode_status(st[j]))}"
+                elif temp[j] >= self.lim["temp_fail_c"]:
+                    out[j] = f"{j} at {temp[j]} C: too hot to keep moving"
+            return out
+        first = bad()
+        if first:
+            time.sleep(0.1)
+            again = bad()
+            for j, msg in first.items():
+                if j in again:
+                    raise MotionError(again[j])
 
     # --- moves ---------------------------------------------------------------
     def move_joints(self, q_target, duration=None, floor_check=True):
@@ -139,12 +151,39 @@ class Arm:
             if s >= 1.0:
                 break
             time.sleep(1 / rate)
-        time.sleep(0.2)
+        self._settle(q_target)
         self._check_servos()
+
+    def _settle(self, q_target, tol=3, max_comp=90, rounds=4):
+        """Make the joints really arrive. LeRobot runs the servos soft (P gain 16), so gravity and
+        friction leave them 30-40 counts (3-4 deg) short, by a different amount depending on the
+        approach direction. Nudge each goal by the measured error until within `tol` counts."""
+        want = {j: self.to_raw(j, a) for j, a in zip(JOINTS, q_target)}
+        goal = dict(want)
+        for _ in range(rounds):
+            time.sleep(0.25)
+            pos = self.bus.sync_read("Present_Position", normalize=False)
+            err = {j: want[j] - pos[j] for j in want}
+            if max(abs(e) for e in err.values()) <= tol:
+                return
+            for j, e in err.items():
+                goal[j] = int(np.clip(goal[j] + 0.8 * e, want[j] - max_comp, want[j] + max_comp))
+            self.bus.sync_write("Goal_Position", goal, normalize=False)
 
     def level_roll(self):
         """Wrist roll with the jaws level: raw 2048 = the calibration middle pose."""
         return self.to_rad("wrist_roll", TICKS // 2)
+
+    # Every joint finishes its move in the same direction: the servos stop slightly differently
+    # depending on which side they come from (up to ~19 px in the wrist camera, measured 20 Oct).
+    APPROACH = np.radians([3, -3, -3, -3, 0])
+
+    def move_joints_repeatable(self, q, duration=None):
+        """Go to q always via the same nearby pre-pose, so the pose repeats to the pixel."""
+        q = np.asarray(q, float)
+        pre = np.clip(q + self.APPROACH, self.kin.limits[:, 0], self.kin.limits[:, 1])
+        self.move_joints(pre, duration)
+        self.move_joints(q, 0.5)
 
     def move_tip(self, xyz, duration=None, tilt=0.0, roll=None):
         """Gripper tip to xyz (metres, base_link), pointing straight down. The wrist roll is
