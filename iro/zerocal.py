@@ -13,6 +13,7 @@ import json
 import re
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
 import yaml
@@ -124,7 +125,18 @@ def main():
     log = ROOT / "arm" / "calibration" / f"touches_{time.strftime('%Y%m%d-%H%M%S')}.json"
     kin = Kinematics()
     if len(sys.argv) > 1:   # re-solve saved touches: iro arm zero arm/calibration/touches_*.json
-        saved = json.loads(open(sys.argv[1]).read())
+        arg = sys.argv[1]
+        if arg == "last":
+            found = sorted((ROOT / "arm" / "calibration").glob("touches_*.json"))
+            if not found:
+                sys.exit("No saved touches yet.")
+            arg = str(found[-1])
+        path = next((p for p in (Path(arg), ROOT / arg, ROOT / "arm" / "calibration" / Path(arg).name) if p.exists()), None)
+        if path is None:
+            sys.exit(f"Touch file not found: {arg}. Saved ones are in {ROOT / 'arm' / 'calibration'}; "
+                     "or use `iro arm zero last`.")
+        sys.argv[1] = str(path)
+        saved = json.loads(path.read_text())
         raws = saved["raw"]
         qs = [[signs.get(j, 1) * (r[j] - TICKS / 2) * 2 * np.pi / TICKS + base.get(j, 0.0) for j in JOINTS] for r in raws]
         print(f"Re-solving {len(qs)} saved touches from {sys.argv[1]}")
