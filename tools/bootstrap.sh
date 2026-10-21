@@ -80,6 +80,7 @@ if [ -d "$ROOT/backup/claude-memory" ]; then
     mkdir -p "$MEM" && cp -n "$ROOT/backup/claude-memory/"* "$MEM/" || true
 fi
 crontab -l 2>/dev/null | grep -q tools/backup.sh || "$ROOT/tools/install-autobackup.sh"
+"$ROOT/tools/iro" feed install           # live camera page always on (port 8080)
 
 cat <<EOF
 

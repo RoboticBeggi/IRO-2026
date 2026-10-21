@@ -30,7 +30,9 @@ SMOOTH, SAFE CONTROL:
     measured, gravity-sagged angles is what made the arm creep downwards)
   - commands never run more than 4 deg ahead of the measured joints (no wind-up)
   - deadband with hysteresis (start > 22 px off, stop < 10 px), 15 Hz, gain halves on overshoot
-  - runaway guard: if the object keeps getting further from the centre while steering, stop
+  - wrong steering is caught when it is MEASURED (fresh pictures; + and - nudges must move the
+    picture opposite ways), not while tracking: you moving the object away fast looks the same
+  - lost = the arm holds still and keeps searching (the whole picture) until Ctrl+C
 
 Failsafes: steps <= 1.5 deg, joint limits, gripper never below 3 cm above the floor,
 watchdog (load > 85% x3, 60 C or servo errors, each confirmed by a second read) freezes the arm.
@@ -530,7 +532,7 @@ def main():
             q_meas = arm.joints()
             dog = Watchdog(arm)
             err_f, moving, gain, last_sign = np.zeros(2), False, GAIN, np.zeros(2)
-            away, t_ctrl, t_lost_msg = [], 0.0, 0.0
+            t_ctrl, t_lost_msg = 0.0, 0.0
             while True:
                 reason = dog.check()
                 if reason:
@@ -563,12 +565,6 @@ def main():
                         flips = np.sum((sign != last_sign) & (np.abs(err_f) > DEAD_OUT) & (last_sign != 0))
                         gain = max(0.08, gain * 0.5) if flips else min(GAIN, gain * 1.1)   # overshoot: back off
                         last_sign = sign
-                        away = [(t, d) for t, d in away if t_ctrl - t < 1.5] + ([(t_ctrl, size)] if moving else [])
-                        if not moving:
-                            away = []
-                        elif len(away) > 15 and away[-1][1] - away[0][1] > 120:
-                            raise MotionError(f"the {lock.name or 'object'} kept running away from the centre while the "
-                                              f"arm followed it (steering wrong?). Re-measure: iro track {lock.name or ''} --measure")
                         if moving and J is not None:
                             dq = np.clip(-gain * Jinv @ err_f, -STEP_MAX, STEP_MAX)
                             new = q_cmd.copy()
@@ -581,7 +577,7 @@ def main():
                                 lock.ego += shift
                                 q_cmd = sent
                     else:
-                        err_f, moving, away = np.zeros(2), False, []
+                        err_f, moving = np.zeros(2), False
 
                 bw, bh = lock.box[2] - lock.box[0], lock.box[3] - lock.box[1]
                 log.write(f"{time.time() - t_start:.3f},{state},{lock.age():.2f},{lock.peak:.2f},{lock.why.replace(',', ';')},"
@@ -593,13 +589,10 @@ def main():
                          f"wrist {np.degrees(q_meas[WRIST]):.1f}  err {err_f[0]:.0f},{err_f[1]:.0f}",
                          lock.why or ""]
                 rec_v.add(f, lock.pm, lock.box, lock.window, lines, pred, vit, color)
-                if state == "LOST" and time.time() - t_lost_msg > 3:
+                if state == "LOST" and time.time() - t_lost_msg > 5:   # keeps searching until Ctrl+C
                     t_lost_msg = time.time()
-                    print(f"  lost for {lock.age():.0f} s: {lock.why or 'searching'}")
+                    print(f"  lost for {lock.age():.0f} s, still searching (arm holds): {lock.why or 'nothing seen'}")
                 cam.flash(live_view(f, lock.box, color, lock.name or "target", w, h), f"{state} | peak {lock.peak:.2f}", 0.2)
-                if lock.age() > 15:
-                    print("Lost for 15 s: stopping (arm holds).")
-                    break
     except KeyboardInterrupt:
         print("\nStopped: the arm holds its pose (`iro arm off` = limp).")
     except (MotionError, BusyError) as e:

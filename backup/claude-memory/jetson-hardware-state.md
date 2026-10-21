@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1cabac2b-8711-4426-81e7-373cd5327053
-  modified: 2026-10-21T06:57:00.098Z
+  modified: 2026-10-21T07:13:36.724Z
 ---
 
 Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname `ubuntu`, MAXN_SUPER.
@@ -25,6 +25,7 @@ Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname 
 - 21 Oct: EFAD (user's name: Embedded Foundational Augmented Detection) = iro/efad.py + iro/oak.py: OAK-D Pro W (IMX378 + OV9282 stereo, IR LM3644, USB3), 640x400 ROBOTICS preset, ext disparity, IR 0.5; depth aligned to colour. OAK on body: 11.5 cm high, pitched 26.6 deg down (config). Calibration via AprilTag 36h11 40 mm on gripper (`iro efad calibrate`, solver tested 4 mm). Not yet calibrated/picked on hardware. `iro track` (iro/track.py): VitTrack (models/vittrack.onnx) + background EFAD re-find, pan+wrist visual servo with measured 2x2 Jacobian, failsafes (2.5 deg/step, floor 3 cm, load>85% x3, 60 C). 30 fps loop tested without motion; not yet run with arm motion. Sponges are white.
 - Arm pick pipeline (iro/kinematics.py, iro/motion.py, iro/pick.py; `iro pick`): YOLO11n 30 fps on mono wrist cam; FK matches ROS TF exactly. SO-101 can point straight down only up to ~8 cm (wrist limit 95 deg); look pose leans 25 deg outward at 12 cm. Visual servoing with runtime image Jacobian; `iro pick teach` sets table_z/grasp_z/grasp_pixel. Not yet run on hardware (waits for recalibration).
 - 21 Oct 15:00: `iro track Tape` locked on correctly (patch matcher + confirm) but the cached steering had the wrist column REVERSED (+7 px/deg; physics: wrist tilting down → picture moves up, ~-13 px/deg), so the arm tilted away. Fixed: flow_jacobian takes fresh frames + requires +/- nudges to shift opposite ways; SteerCheck (Broyden) corrects J live; runaway guard stops the arm. Bad cache kept as config/track_jacobian.reversed-20261021.yaml.bak; next run re-measures.
+- 21 Oct 15:15: track rewrite. Root causes found: (a) control copied MEASURED (gravity-sagged) angles of ALL joints into each command → arm ratcheted downward; (b) VitTrack was trusted at score>0.25 and drifted onto the dark sofa shadow; (c) watchdog stopped on a single garbled 88 C read (real 42 C); (d) live Broyden steering correction thrashed (removed). New: matcher is the authority (zoomed search window), taught size/shape/brightness profile gates, scene negatives at lock-on, held-out ref_peak (Tape 0.34, bar 0.12; held-out 10/12 found, 0 false), motion only on fresh sighting, --watch mode, every run recorded to ~/iro-runs/<stamp>_<name>/run.mp4 + log.csv; `iro track review` makes contact sheets for Claude to inspect.
 - Old lost project was named PUSAKA; see repo salvage/README.md.
 
 **Why:** a previous SSD death wiped the user's whole project, so recoverability matters most.
