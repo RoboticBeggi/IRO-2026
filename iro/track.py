@@ -38,6 +38,8 @@ import numpy as np
 from iro import ROOT
 
 MODEL = ROOT / "models" / "vittrack.onnx"
+START_SHOT = ROOT.parent / "iro-track-start.jpg"     # what it locked on (for checking)
+LOG = ROOT.parent / "iro-track-log.csv"              # per-frame numbers (for diagnosis)
 STEP_MAX = np.radians(1.5)
 GAIN = 0.25
 DEAD_IN, DEAD_OUT = 22, 10        # px: start correcting above DEAD_IN, settle below DEAD_OUT
@@ -138,6 +140,7 @@ class Lock:
     def judge(self, result, track_ok):
         """Apply the gates to a re-find. Returns 'confirm', 'switch', or None."""
         frame, boxes, e = result
+        self.why = "nothing found"
         if not boxes:
             return None
         sim, margin = self.appearance(e)
@@ -153,6 +156,13 @@ class Lock:
             self.distract = np.vstack([self.distract, e[near_miss]])[-1500:]
         if not ok:
             self.pending = None
+            near = [i for i in range(len(boxes)) if np.linalg.norm(centre(boxes[i]) - pred) < radius]
+            if not near:
+                self.why = "nothing near the predicted spot"
+            else:
+                k = max(near, key=lambda j: sim[j])
+                self.why = (f"best nearby: look {sim[k]:.2f} margin {margin[k]:+.2f} "
+                            f"size x{area(boxes[k]) / area(self.box):.1f}")
             return None
         i = max(ok, key=lambda k: margin[k])
         b = boxes[i]
@@ -168,6 +178,7 @@ class Lock:
             self.kf.update(centre(b))
             return "switch"
         self.pending = b
+        self.why = "waiting for a 2nd confirmation"
         return None
 
 
@@ -208,6 +219,58 @@ def write_joints(arm, q):
     return q
 
 
+def wiggle_box(cam, seconds=1.5):
+    """Box around what MOVES while the camera is still: wiggle the object to select it.
+    Works for any object, even plain white ones the finder does not box well."""
+    frames, t0 = [], time.time()
+    while time.time() - t0 < seconds:
+        frames.append(cv2.GaussianBlur(cv2.cvtColor(cam.latest(), cv2.COLOR_BGR2GRAY), (5, 5), 0))
+    if len(frames) < 5:
+        return None
+    motion = np.zeros(frames[0].shape, np.float32)
+    for a, b in zip(frames, frames[1:]):
+        motion += cv2.absdiff(a, b) > 20
+    mask = (motion > max(2, 0.15 * len(frames))).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)), iterations=2)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    x, y, w, h = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    H, W = mask.shape
+    if w * h < 0.005 * H * W or w * h > 0.6 * H * W:
+        return None
+    return (x, y, x + w, y + h)
+
+
+def choose_target(rec, cam, input_fn=input):
+    """Let the person pick the target and SEE what was picked before tracking starts."""
+    from iro.instant import centre_thing
+    from iro.objects import draw_box
+    while True:
+        cam.status = "WIGGLE the object in front of the camera (keep the camera still)"
+        input_fn("Hold the object in front of the wrist camera. Press Enter, then WIGGLE it gently for 2 s. ")
+        box = wiggle_box(cam)
+        f = cam.latest()
+        how = "wiggle"
+        if box is None:                                   # no clear motion: fall back to the middle thing
+            box = centre_thing(rec.things(f), f.shape)
+            how = "middle of the picture"
+        if box is None:
+            print("  Could not find it. Try again, wiggle a little more (but keep it in view).")
+            continue
+        # snap to the finder's tighter box if one sits on the wiggle area
+        cands = [b for b in rec.things(f) if iou(b, box) > 0.3]
+        if cands:
+            box = max(cands, key=lambda b: iou(b, box))
+        shot = draw_box(f, box, (0, 255, 0), "target?")
+        cv2.imwrite(str(START_SHOT), shot)
+        cam.flash(shot, "Is the green box on your object?  Enter = yes,  r = retry", 30)
+        a = input_fn(f"  Picked by {how}. Is the GREEN box on your object (live feed)? Enter = yes, r = retry: ")
+        cam.hold_until = 0
+        if a.strip().lower() != "r":
+            return f, box
+
+
 def measure_jacobian(arm, cam, lock, q0):
     """Pixels the object moves per radian of pan and of wrist bend (2x2), from small nudges."""
     from iro.objects import grab
@@ -216,21 +279,29 @@ def measure_jacobian(arm, cam, lock, q0):
         pts = []
         for sign in (+1, -1):
             q = q0.copy()
-            q[joint] += sign * np.radians(5)
+            q[joint] += sign * np.radians(7)
             arm.move_joints(q, duration=0.6)
             time.sleep(0.3)
             ok, b = lock.tracker.update(grab(cam))
             if not ok:
                 return None
             pts.append(np.array([b[0] + b[2] / 2, b[1] + b[3] / 2]))
-        J[:, k] = (pts[0] - pts[1]) / np.radians(10)
+        J[:, k] = (pts[0] - pts[1]) / np.radians(14)
         arm.move_joints(q0, duration=0.6)
         time.sleep(0.3)
         ok, b = lock.tracker.update(grab(cam))
         if ok:
             lock.box = np.array([b[0], b[1], b[0] + b[2], b[1] + b[3]], float)
             lock.kf = Kalman(centre(lock.box))
-    return J if abs(np.linalg.det(J)) > 1e3 else None
+    # pan must move the picture mostly sideways, wrist bend mostly up/down; otherwise the target
+    # moved during the nudges (or was not the object) and steering would go the wrong way
+    sideways_ok = abs(J[0, 0]) > 1.5 * abs(J[1, 0])
+    updown_ok = abs(J[1, 1]) > 1.5 * abs(J[0, 1])
+    print(f"  measured: pan moves the picture {np.round(J[:, 0] * np.radians(1), 1)} px/deg, "
+          f"wrist {np.round(J[:, 1] * np.radians(1), 1)} px/deg")
+    if abs(np.linalg.det(J)) < 1e3 or not (sideways_ok and updown_ok):
+        return None
+    return J
 
 
 def main():
@@ -242,7 +313,7 @@ def main():
     from concurrent.futures import ThreadPoolExecutor
 
     from iro.hw.servos import BusyError
-    from iro.instant import Recognizer, centre_thing
+    from iro.instant import Recognizer
     from iro.motion import Arm, MotionError
     from iro.objects import draw_box, grab, open_camera
 
@@ -269,25 +340,28 @@ def main():
                     print(f"Cannot see {a.name}. Show it to the wrist camera (live feed) and try again.")
                     return 1
             else:
-                cam.status = "hold the object in the MIDDLE of the picture, then press Enter"
-                input("Hold the object in the middle of the wrist camera view (live feed), then press Enter. ")
-                f = grab(cam)
-                box = centre_thing(rec.things(f), f.shape)
-                if box is None:
-                    h, w = f.shape[:2]
-                    box = (w / 2 - 60, h / 2 - 60, w / 2 + 60, h / 2 + 60)
+                f, box = choose_target(rec, cam)
                 lock = Lock(rec, f, box, a.remember)
             print(f"Locked ({len(lock.distract)} distractors noted). Hold it still ~3 s while the arm measures...")
             cam.status = "hold still: measuring"
-            J = measure_jacobian(arm, cam, lock, arm.joints())
+            q0 = arm.joints()
+            J = measure_jacobian(arm, cam, lock, q0)
             if J is None:
-                print("Lost it while measuring. Keep it still and in view, and try again.")
+                print("  that measurement looks wrong (did the object move?). Measuring again: hold it STILL...")
+                time.sleep(1.0)
+                J = measure_jacobian(arm, cam, lock, q0)
+            if J is None:
+                print("Could not measure reliably. Rest the object on something (or the floor) so it is "
+                      "perfectly still for the 4 s of measuring, and try again.")
                 return 1
             Jinv = np.linalg.inv(J)
             print("Tracking. Move it slowly at first. Ctrl+C to stop.")
 
             # 2. follow
             pool, job = ThreadPoolExecutor(1), None
+            log = open(LOG, "w")
+            log.write("t,score,ok,track_ok,lost,cx,cy,err_x,err_y,gain,pan_deg,wrist_deg,refind\n")
+            t_start, q_log = time.time(), arm.joints()
             dog = Watchdog(arm)
             err_f, moving, gain, last_sign = np.zeros(2), False, GAIN, np.zeros(2)
             n, nf, t_fps, fps, t_ctrl = 0, 0, time.time(), 0.0, 0.0
@@ -303,7 +377,7 @@ def main():
                 score = lock.tracker.getTrackingScore() if ok else 0.0
                 tb = np.array([b[0], b[1], b[0] + b[2], b[1] + b[3]], float) if ok else None
                 # tracker result must also be where the object can plausibly be
-                track_ok = ok and score > 0.35 and np.linalg.norm(centre(tb) - pred) < lock.kf.gate_radius(0) * 1.5
+                track_ok = ok and score > 0.25 and np.linalg.norm(centre(tb) - pred) < lock.kf.gate_radius(0) * 2
                 if track_ok:
                     lock.box = tb
                     lock.kf.update(centre(tb))
@@ -312,8 +386,10 @@ def main():
                     lock.lost_since = time.time()
                 if job is None and (n % REDETECT_EVERY == 0 or lock.lost_since):
                     job = pool.submit(lock.refind, f.copy())
+                verdict = ""
                 if job is not None and job.done():
-                    if lock.judge(job.result(), track_ok) == "switch":
+                    verdict = lock.judge(job.result(), track_ok) or "rejected:" + lock.why
+                    if verdict == "switch":
                         print("  re-locked on the object")
                     job = None
                 lost = lock.lost_since is not None
@@ -338,7 +414,12 @@ def main():
                             q_cmd = q_meas.copy()
                             q_cmd[PAN] += dq[0]
                             q_cmd[WRIST] += dq[1]
-                            write_joints(arm, q_cmd)
+                            sent = write_joints(arm, q_cmd)
+                            q_log = sent if sent is not None else q_log
+                c_now = centre(lock.box)
+                log.write(f"{time.time() - t_start:.3f},{score:.2f},{int(ok)},{int(track_ok)},{int(lock.lost_since is not None)},"
+                          f"{c_now[0]:.0f},{c_now[1]:.0f},{err_f[0]:.0f},{err_f[1]:.0f},{gain:.2f},"
+                          f"{np.degrees(q_log[PAN]):.1f},{np.degrees(q_log[WRIST]):.1f},{verdict}\n")
                 if time.time() - t_fps >= 1:
                     fps, nf, t_fps = nf / (time.time() - t_fps), 0, time.time()
                 color = (0, 255, 0) if not lost else ((0, 220, 255) if coasting else (0, 0, 255))
