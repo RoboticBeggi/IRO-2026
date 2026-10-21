@@ -44,6 +44,7 @@ EFAD (Embedded Foundational Augmented Detection) - live view: http://localhost:8
   iro efad marker         print-out for calibrating the OAK-D to the arm
   iro efad calibrate      where the OAK-D sits relative to the arm (marker on the gripper)
   iro efad pick NAME      find NAME in 3D and pick it   (--dry-run, --drop)
+  iro track [NAME]        the arm follows an object with the wrist camera (--remember NAME)
   iro object show NAME    INSTANT: show an object ~15 s and name it; recognised at once
   iro object add NAME     teach a new object: the arm films it from many angles, labels itself
   iro object train        train YOLO on all taught objects (10-20 min)
@@ -117,6 +118,7 @@ d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))"
     pick) exec python -m iro.pick "$@" ;;
     vision) exec python -u -m iro.efad wrist ;;
     efad) exec python -u -m iro.efad "$@" ;;
+    track) exec python -u -m iro.track "$@" ;;
     object) exec python -m iro.objects "$@" ;;
 
     hw) [ "${1:-snapshot}" = snapshot ] || die "usage: iro hw snapshot"; exec python -m iro.hwsnap ;;

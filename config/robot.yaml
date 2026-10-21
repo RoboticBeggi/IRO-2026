@@ -21,7 +21,11 @@ devices:
     device: /dev/video0         # "openaicam" global-shutter camera
     usb: "32e6:9251"
   depth_camera:
-    usb: ["03e7:2485", "03e7:f63b"]   # OAK-D: unbooted / booted
+    usb: ["03e7:2485", "03e7:f63b"]   # OAK-D Pro W: unbooted / booted
+    # Mounted on the body (measured 21 Oct): lens 11.5 cm above the floor, looking down at the
+    # floor 23 cm ahead (slant 25.7 cm) => pitched 26.6 deg down
+    height_m: 0.115
+    pitch_down_deg: 26.6
   mic_array:
     usb: "2886:001a"            # reSpeaker XVF3800
     alsa_name: "XVF3800"

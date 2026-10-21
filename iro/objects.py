@@ -63,6 +63,7 @@ class Camera:
             if not ok:
                 time.sleep(0.05)
                 continue
+            self.last, self.last_n = f, getattr(self, "last_n", 0) + 1
             text = self.status
             if self.overlay:
                 try:
@@ -72,8 +73,8 @@ class Camera:
                     pass
             if time.time() >= self.hold_until:
                 self.feed.show(f, text)
-            if not self.overlay:
-                time.sleep(0.03)   # plain preview: ~30 fps is plenty; with YOLO the detector sets the pace
+            if not self.overlay and time.time() < self.hold_until:
+                time.sleep(0.005)  # someone is using the frames: keep reading at camera speed
 
     def flash(self, img, text, seconds=0.6):
         """Show a still (e.g. a just-labelled picture) for a moment before the live view resumes."""
@@ -104,6 +105,17 @@ class Camera:
     def read(self):
         with self.lock:
             return self.cap.read()
+
+    def latest(self, timeout=1.0):
+        """The newest frame the preview thread captured (waits for one newer than last time):
+        no extra camera reads, so a fast loop gets every frame at full camera speed."""
+        seen, t0 = getattr(self, "_seen", 0), time.time()
+        while getattr(self, "last_n", 0) == seen:
+            if time.time() - t0 > timeout:
+                raise RuntimeError("wrist camera stopped sending frames")
+            time.sleep(0.002)
+        self._seen = self.last_n
+        return self.last.copy()
 
     def release(self):
         self.running = False
