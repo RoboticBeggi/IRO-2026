@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1cabac2b-8711-4426-81e7-373cd5327053
-  modified: 2026-10-20T07:07:57.325Z
+  modified: 2026-10-21T04:36:01.278Z
 ---
 
 Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname `ubuntu`, MAXN_SUPER.
@@ -22,6 +22,7 @@ Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname 
 - Arm sag/hysteresis: LeRobot P gain 16 leaves shoulder/elbow 30-40 counts short (direction-dependent, up to 19 px in camera). Fixed in iro/motion.py: `_settle` closes the loop to ±3 counts; `move_joints_repeatable` approaches via fixed pre-pose; object capture replays stored joint angles; object_box phase-aligns frames. Repeat test after fix: worst 4.7 px, 0 false objects. One garbled temp read (66 C, real 38) → fault checks now confirm with a second read.
 - Object teaching v2 (20 Oct): heights relative to table (look 15 cm, lift 10, grasp 2.5); capture sweep 20 poses, 10-24 cm above table, ±8 cm sideways (pan -28..+34 deg); bg-diff box → MobileSAM box-prompt refine (models/mobile_sam.pt, 0.3 s/img) → masks; per-pose size consistency filter; training holds out last round per object, ~10% bg negatives, 150 copy-paste synth/object, mono-friendly aug. Real camera mount differs from URDF (looks forward, not down). 5-DOF arm can't view object sides → user rotates object between rounds.
 - INSTANT recognition (iro/instant.py, `iro object show NAME`): YOLOE-11s prompt-free proposals + DINOv2-small (timm, img 224, fp16) fingerprints, margin vs "not an object" memory (MARGIN -0.10). Held-out test: 12/12 found, 0/306 false. ~6 fps in iro vision. Memory in objects/memory/*.npy (git); models/ yoloe-11s-seg-pf.pt, dinov2_vits14.pth, mobile_sam.pt (not in git: USB kit only). User preferred this over training (they built a YOLO-World-like thing in the old project).
+- 21 Oct: EFAD (user's name: Embedded Foundational Augmented Detection) = iro/efad.py + iro/oak.py: OAK-D Pro W (IMX378 + OV9282 stereo, IR LM3644, USB3), 640x400 ROBOTICS preset, ext disparity, IR 0.5; depth aligned to colour. OAK on body: 11.5 cm high, pitched 26.6 deg down (config). Calibration via AprilTag 36h11 40 mm on gripper (`iro efad calibrate`, solver tested 4 mm). Not yet calibrated/picked on hardware. `iro track` (iro/track.py): VitTrack (models/vittrack.onnx) + background EFAD re-find, pan+wrist visual servo with measured 2x2 Jacobian, failsafes (2.5 deg/step, floor 3 cm, load>85% x3, 60 C). 30 fps loop tested without motion; not yet run with arm motion. Sponges are white.
 - Arm pick pipeline (iro/kinematics.py, iro/motion.py, iro/pick.py; `iro pick`): YOLO11n 30 fps on mono wrist cam; FK matches ROS TF exactly. SO-101 can point straight down only up to ~8 cm (wrist limit 95 deg); look pose leans 25 deg outward at 12 cm. Visual servoing with runtime image Jacobian; `iro pick teach` sets table_z/grasp_z/grasp_pixel. Not yet run on hardware (waits for recalibration).
 - Old lost project was named PUSAKA; see repo salvage/README.md.
 
