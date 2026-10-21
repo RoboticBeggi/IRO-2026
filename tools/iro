@@ -37,8 +37,13 @@ ARM (SO-ARM101)
   iro pick look           go to the look pose, show what YOLO sees
   iro pick teach          one-time pick setup with your hands on the arm
 
-VISION
-  iro vision              live wrist camera + YOLO boxes in the browser (http://localhost:8080)
+EFAD (Embedded Foundational Augmented Detection) - live view: http://localhost:8080
+  iro efad see            OAK-D: names + 3D positions of remembered objects
+  iro efad wrist          wrist camera + YOLO boxes   (same as: iro vision)
+  iro efad show NAME      teach an object to the OAK-D in ~15 s (colour; what EFAD picks with)
+  iro efad marker         print-out for calibrating the OAK-D to the arm
+  iro efad calibrate      where the OAK-D sits relative to the arm (marker on the gripper)
+  iro efad pick NAME      find NAME in 3D and pick it   (--dry-run, --drop)
   iro object show NAME    INSTANT: show an object ~15 s and name it; recognised at once
   iro object add NAME     teach a new object: the arm films it from many angles, labels itself
   iro object train        train YOLO on all taught objects (10-20 min)
@@ -110,7 +115,8 @@ d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))"
         esac ;;
 
     pick) exec python -m iro.pick "$@" ;;
-    vision) exec python -u -m iro.vision "$@" ;;
+    vision) exec python -u -m iro.efad wrist ;;
+    efad) exec python -u -m iro.efad "$@" ;;
     object) exec python -m iro.objects "$@" ;;
 
     hw) [ "${1:-snapshot}" = snapshot ] || die "usage: iro hw snapshot"; exec python -m iro.hwsnap ;;

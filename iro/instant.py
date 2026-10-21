@@ -148,11 +148,29 @@ def centre_thing(boxes, shape):
     return min(inside, key=lambda b: (b[2] - b[0]) * (b[3] - b[1])) if inside else None
 
 
-def cmd_show(name, seconds=15):
+class OakSource:
+    """Lets `show` teach from the OAK-D colour camera (what EFAD picks with) instead of the wrist."""
+
+    def __init__(self):
+        from iro.oak import Oak
+        from iro.stream import feed
+        self.oak, self.feed, self.status, self.hold_until = Oak(), feed(), "", 0
+
+    def read(self):
+        return True, self.oak.read(1)[0]
+
+    def flash(self, img, text, seconds=0.3):
+        self.feed.show(img, text)
+
+    def release(self):
+        self.oak.close()
+
+
+def cmd_show(name, seconds=15, oak=False):
     from iro.objects import draw_box, open_camera
     name = name.strip().replace(" ", "_")
     rec = Recognizer()
-    cam = open_camera()
+    cam = OakSource() if oak else open_camera()
     print(f"Show the {name}: put it in the MIDDLE of the camera view (live feed), then slowly turn and "
           f"move it for {seconds} s (different sides, nearer and further). Ctrl+C to stop early.")
     cam.status = f"show the {name} in the middle of the picture"
