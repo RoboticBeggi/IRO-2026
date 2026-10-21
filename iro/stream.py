@@ -114,7 +114,8 @@ class Feed:
                 ip = sk.getsockname()[0]
         except OSError:
             ip = "<jetson-ip>"
-        print(f"Live feed: http://localhost:{self.port}   (laptop on the same network: http://{ip}:{self.port})")
+        print(f"Live feed: http://localhost:{self.port}  |  laptop on the same Wi-Fi: "
+              f"http://{socket.gethostname()}.local:{self.port}  or  http://{ip}:{self.port}")
         return self
 
     def show(self, img, text=None):

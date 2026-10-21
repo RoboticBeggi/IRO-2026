@@ -27,6 +27,8 @@ sudo apt-get install -y git python3-pip python3.10-venv ffmpeg rsync curl softwa
 sudo usermod -aG dialout "$USER"          # serial ports: arm, lidar, PRIZM
 sudo cp "$ROOT/tools/99-iro-usb.rules" /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
+# live camera page (EFAD) reachable from a laptop on the same network
+if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then sudo ufw allow 8080/tcp; fi
 
 echo "== 2/6 ROS 2 Humble"
 if [ ! -f /etc/apt/sources.list.d/ros2.list ]; then
