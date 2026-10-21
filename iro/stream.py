@@ -8,7 +8,8 @@ The page is served by a small helper that keeps running on its own (it is starte
 camera program that needs it, and at boot by cron @reboot). Programs (`iro track`, `iro efad`,
 `iro object`, `iro pick`, ...) send their pictures to it with `feed().show(img, text)`. When no
 program runs, the page shows a standby picture instead of disappearing; it checks in every
-second and reconnects by itself, so it never needs a refresh.
+second and reconnects by itself, so it never needs a refresh. Everything a program shows is
+also RECORDED (iro/record.py: ~/iro-runs/<time>_<program>/feed.mp4; review: iro review).
 
     http://localhost:8080   |   laptop: http://ubuntu.local:8080 (needs: sudo ufw allow 8080/tcp)
 """
@@ -260,6 +261,8 @@ class Feed:
             img = img.copy()
             cv2.rectangle(img, (0, img.shape[0] - 28), (img.shape[1], img.shape[0]), (0, 0, 0), -1)
             cv2.putText(img, text[:80], (8, img.shape[0] - 9), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+        from iro.record import run
+        run().video("feed", img)                 # everything shown live is also recorded
         jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
         with self.cond:
             self.pending = (jpg, (text or "")[:200])

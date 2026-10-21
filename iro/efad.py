@@ -5,7 +5,9 @@
     iro efad show NAME      teach an object to the OAK-D (colour) in ~15 s, no training
     iro efad calibrate      find where the OAK-D sits relative to the arm (NO marker: the gripper
                             opens/closes in front of it and is found by itself; the floor double-checks)
+    iro efad calibrate --test   first: only checks the OAK-D finds the gripper (12 poses, saves nothing)
     iro efad check          has the OAK-D moved since? (re-measures the floor, ~3 s)
+Every run is recorded (~/iro-runs, iro review): calibration saves a 4-panel picture per pose.
     iro efad pick NAME      find NAME in 3D and pick it up      (--dry-run, --drop)
 
 How the pieces work together:
@@ -74,7 +76,7 @@ def floor_plane(oak, depth, iters=300):
             best = inl
     Q = P[best]
     c = Q.mean(0)
-    n = np.linalg.svd(Q - c)[2][2]
+    n = np.linalg.svd(Q - c, full_matrices=False)[2][2]   # full_matrices=True: a 16k x 16k matrix, 2 GB
     if n[1] > 0:                       # camera y points down: the floor's "up" has negative y
         n = -n
     return n, float(-n @ c), float(np.sqrt(np.mean(((Q - c) @ n) ** 2)))
@@ -85,36 +87,92 @@ def mount_from_floor(n, d):
     return abs(d), float(np.degrees(np.arcsin(abs(n[2])))), float(np.degrees(np.arctan2(n[0], -n[1])))
 
 
+MIN_RANGE = 0.22            # m: the OAK-D Pro W measures depth from ~20 cm (400p, extended disparity)
+
+
+def jaw_change(oak, a, b):
+    """What changed between two (colour, depth) shots. Returns (point or None, blob mask, info)."""
+    (ia, da), (ib, db) = a, b
+    ga, gb = cv2.cvtColor(ia, cv2.COLOR_BGR2GRAY), cv2.cvtColor(ib, cv2.COLOR_BGR2GRAY)
+    col = cv2.absdiff(cv2.GaussianBlur(ga, (5, 5), 0), cv2.GaussianBlur(gb, (5, 5), 0)) > 30
+    both = (da > 0) & (db > 0)
+    dep = both & (np.abs(da.astype(np.float32) - db.astype(np.float32)) > 15)
+    # the jaw must be SEEN to move (colour); depth-only change is flicker (21 Oct: a far-floor
+    # flicker gave a false "found at 115 cm" with 0 changed colour pixels)
+    m = cv2.morphologyEx(col.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
+    info = {"colour_px": int(col.sum()), "depth_px": int(dep.sum())}
+    n, lab, st, _ = cv2.connectedComponentsWithStats(m)
+    if n <= 1:
+        info["why"] = "nothing changed (gripper out of view?)"
+        return None, m > 0, info
+    k = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+    blob = lab == k
+    info["blob_px"] = int(st[k, cv2.CC_STAT_AREA])
+    info["blob_box"] = [int(v) for v in st[k, :4]]
+    if info["blob_px"] < 120:
+        info["why"] = f"change too small ({info['blob_px']} px)"
+        return None, blob, info
+    ys, xs = np.nonzero(blob)
+    info["pix"] = [float(xs.mean()), float(ys.mean())]          # where the jaw moved, in the picture
+    info["why"] = ""
+    # depth is a bonus: the lower half of the picture is closer than the ~20 cm depth needs
+    near = np.where((da > 0) & ((db == 0) | (da < db)), da, db)     # the jaw is the NEARER surface
+    info["depth_valid"] = round(float(((near > 0) & blob).sum() / blob.sum()), 2)
+    P = oak.points(near, blob)
+    p = None
+    if len(P) >= 40 and info["depth_valid"] > 0.5:
+        P = P[P[:, 2] < np.percentile(P[:, 2], 50) + 0.03]
+        q = np.median(P, 0)
+        if np.linalg.norm(q) >= MIN_RANGE:
+            p = q
+            info["dist_m"] = round(float(np.linalg.norm(q)), 3)
+    return p, blob, info
+
+
+def panel(shots, mask, text):
+    """2x2 picture for the recording: open | closed / what changed | depth."""
+    (ia, da), (ib, _) = shots[0], shots[1]
+    ov = ib.copy()
+    ov[mask] = (ov[mask] * 0.3 + np.array([0, 255, 0]) * 0.7).astype(np.uint8)
+    dv = cv2.applyColorMap(np.uint8(np.clip(da / 1500.0, 0, 1) * 255), cv2.COLORMAP_TURBO)
+    dv[da == 0] = 0
+    tiles = [cv2.resize(x, (320, 200)) for x in (ia, ib, ov, dv)]
+    for t, lab in zip(tiles, ("open", "closed", "changed", "depth (black = none)")):
+        cv2.putText(t, lab, (6, 192), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+    out = np.vstack([np.hstack(tiles[:2]), np.hstack(tiles[2:])])
+    cv2.putText(out, text[:80], (6, 216), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    return out
+
+
 def find_jaw(arm, oak):
-    """3D point (camera frame) of the moving jaw: difference of open vs closed pictures. Done
-    twice (open-close-open); both must agree within 1 cm. Returns (point, mask) or (None, mask)."""
+    """Where the moving jaw is: difference of open vs closed pictures, done twice (open-close-open);
+    both must agree within 12 px. Returns (pixel or None, 3D camera point if depth was valid, panel
+    picture, info)."""
     shots = []
     for opened in (True, False, True):
-        arm.gripper(opened, wait=0.7)
+        arm.gripper(opened, wait=0.8)
+        oak.read(1)                               # drop a picture taken while it was still moving
         shots.append(oak.read(3))
-    pts, masks = [], []
-    for (ia, da), (ib, db) in ((shots[0], shots[1]), (shots[1], shots[2])):
-        both = (da > 0) & (db > 0)
-        moved = both & (np.abs(da.astype(np.float32) - db.astype(np.float32)) > 15)
-        moved |= cv2.absdiff(cv2.cvtColor(ia, cv2.COLOR_BGR2GRAY), cv2.cvtColor(ib, cv2.COLOR_BGR2GRAY)) > 35
-        m = cv2.morphologyEx(moved.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        n, lab, st, _ = cv2.connectedComponentsWithStats(m)
-        if n <= 1:
-            return None, m
-        k = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
-        if st[k, cv2.CC_STAT_AREA] < 150:
-            return None, m
-        blob = lab == k
-        near = np.where((da > 0) & ((db == 0) | (da < db)), da, db)     # the jaw is the NEARER surface
-        P = oak.points(near, blob)
-        if len(P) < 50:
-            return None, blob
-        P = P[P[:, 2] < np.percentile(P[:, 2], 50) + 0.03]
-        pts.append(np.median(P, 0))
-        masks.append(blob)
-    if np.linalg.norm(pts[0] - pts[1]) > 0.01:
-        return None, masks[0]
-    return (pts[0] + pts[1]) / 2, masks[0] | masks[1]
+    p1, m1, i1 = jaw_change(oak, shots[0], shots[1])
+    p2, m2, i2 = jaw_change(oak, shots[1], shots[2])
+    info = {**i1, "second": i2.get("why", "")}
+    pix, p = None, None
+    if "pix" not in i1 or "pix" not in i2:
+        info["why"] = i1["why"] or i2["why"]
+    elif np.hypot(*np.subtract(i1["pix"], i2["pix"])) > 12:
+        info["why"] = f"two looks disagree by {np.hypot(*np.subtract(i1['pix'], i2['pix'])):.0f} px (something else moved?)"
+    else:
+        pix = list(np.mean([i1["pix"], i2["pix"]], 0))
+        if p1 is not None and p2 is not None and np.linalg.norm(p1 - p2) < 0.015:
+            p = (p1 + p2) / 2
+    info["pix"] = pix
+    txt = ("NOT found: " + info["why"]) if pix is None else (
+        f"FOUND at pixel ({pix[0]:.0f},{pix[1]:.0f})" + (f", depth {np.linalg.norm(p) * 100:.0f} cm" if p is not None else ", no depth (too close)"))
+    pic = panel(shots, m1 | m2, txt)
+    if pix is not None:
+        cv2.drawMarker(pic, (int(pix[0] / 2), int(pix[1] / 2)), (0, 0, 255), cv2.MARKER_CROSS, 16, 2)
+    return pix, p, pic, info
 
 
 def solve_calibration(cam_pts, grip_T):
@@ -177,81 +235,202 @@ def solve_with_floor(cam_pts, grip_T, n_cam, d_cam, table_z, iters=200):
     return T_bc, off, float(np.sqrt(np.mean(np.square(res)))), res
 
 
-def cmd_calibrate():
+def floor_rotation(n_cam):
+    """Rotation turning the camera's floor normal onto the arm's +z."""
+    z = np.array([0.0, 0.0, 1.0])
+    v = np.cross(n_cam, z)
+    vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + vx + vx @ vx / (1 + float(n_cam @ z))
+
+
+def solve_pixels(pix, grip_T, K, n_cam, d_cam, table_z, depth_pts=None):
+    """Where the OAK-D sits, from WHERE IN THE PICTURE the gripper was seen at known arm poses
+    (no depth needed: the gripper is closer than the depth camera's 20 cm in the lower half of
+    the picture). The floor fixes tilt, roll and height; this solves the turn about z, the x/y
+    position and the seen point on the gripper by Gauss-Newton on the pixel error, from several
+    starting turns. depth_pts: optional {index: camera point} where depth was valid (also used).
+    Returns (T_base_cam, point on gripper, rms pixel error, per-pose pixel errors)."""
+    pix = np.asarray(pix, float)
+    R0 = floor_rotation(n_cam)
+    tz = table_z + d_cam
+    Rg = np.array([T[:3, :3] for T in grip_T])
+    tg = np.array([T[:3, 3] for T in grip_T])
+    depth_pts = depth_pts or {}
+
+    def pose(x):
+        c, s_ = np.cos(x[0]), np.sin(x[0])
+        R = np.array([[c, -s_, 0], [s_, c, 0], [0, 0, 1]]) @ R0
+        return R, np.array([x[1], x[2], tz])
+
+    def resid(x):
+        R, t = pose(x)
+        pb = np.einsum("nij,j->ni", Rg, x[3:6]) + tg            # the gripper point, arm frame
+        pc = (pb - t) @ R                                         # ... camera frame
+        z = np.maximum(pc[:, 2], 0.02)
+        r = [(K[0, 0] * pc[:, 0] / z + K[0, 2] - pix[:, 0]), (K[1, 1] * pc[:, 1] / z + K[1, 2] - pix[:, 1])]
+        r += [np.where(pc[:, 2] > 0.02, 0, 500.0)]              # behind the camera: heavy penalty
+        out = np.concatenate(r)
+        if depth_pts:                                            # 1 cm of depth error ~ 10 px
+            out = np.concatenate([out] + [1000 * (pc[i] - np.asarray(q)) for i, q in depth_pts.items()])
+        return out
+
+    best = None
+    for yaw0 in np.radians(np.arange(0, 360, 30)):
+        x = np.array([yaw0, 0.0, 0.0, 0.0, 0.0, 0.03])
+        lam = 1e-2
+        for _ in range(200):
+            r = resid(x)
+            J = np.empty((len(r), 6))
+            for k in range(6):
+                dx = np.zeros(6)
+                dx[k] = 1e-6
+                J[:, k] = (resid(x + dx) - r) / 1e-6
+            step = np.linalg.solve(J.T @ J + lam * np.diag(np.diag(J.T @ J) + 1e-9), -J.T @ r)
+            if (resid(x + step) ** 2).sum() < (r ** 2).sum():
+                x, lam = x + step, lam * 0.3
+                if np.linalg.norm(step) < 1e-9:
+                    break
+            else:
+                lam *= 10
+                if lam > 1e8:
+                    break
+        cost = (resid(x) ** 2).sum()
+        if best is None or cost < best[0]:
+            best = (cost, x)
+    x = best[1]
+    R, t = pose(x)
+    T = np.eye(4)
+    T[:3, :3], T[:3, 3] = R, t
+    n = len(pix)
+    e = resid(x)[:2 * n].reshape(2, n)
+    per = np.hypot(e[0], e[1])
+    return T, x[3:6], float(np.sqrt(np.mean(per ** 2))), per
+
+
+def calibration_poses(table):
+    """Where the OAK-D can see the gripper AND measure its depth (21 Oct test, recorded): it sits
+    low (11.7 cm) tilted 31 deg down, so the gripper is only in view when LOW (higher than ~10 cm
+    it is above the picture) and must be >= 22 cm away (depth starts at ~20 cm): low and far
+    forward. Serpentine order keeps moves short."""
+    out = []
+    for i, hh in enumerate((0.03, 0.06, 0.09)):
+        xs = (0.26, 0.30, 0.34, 0.38) if i % 2 == 0 else (0.38, 0.34, 0.30, 0.26)
+        for j, x in enumerate(xs):
+            ys = (-0.10, -0.03, 0.04, 0.11)
+            for y in (ys if (i + j) % 2 == 0 else ys[::-1]):
+                out.append((x, y, table + hh, 0.0))
+    out += [(0.32, 0.0, table + 0.05, np.radians(r)) for r in (-40, 40, -20)]   # roll variety
+    return out
+
+
+def cmd_calibrate(test=False):
+    """Markerless calibration (test=True: only find the gripper at a few poses, save nothing)."""
     from iro.motion import Arm
     from iro.oak import Oak
     from iro.pick import pick_config
+    from iro.record import run
     from iro.stream import feed
     cfg = pick_config()
+    r = run("efad-calibrate-test" if test else "efad-calibrate")
     oak = Oak()
     f = feed()
-    _, depth = oak.read(5)
+    img, depth = oak.read(5)
+    r.snap("start_oak", img)
     fl = floor_plane(oak, depth)
     if fl is None:
         print("The OAK-D does not see enough floor. Clear the floor in front of the robot and try again.")
+        r.note("no floor seen")
         return 1
     h, tilt, roll = mount_from_floor(fl[0], fl[1])
-    print(f"Floor: OAK-D is {h * 100:.1f} cm above it, tilted {tilt:.1f} deg down, roll {roll:+.1f} deg "
-          f"(floor flat to {fl[2] * 1000:.1f} mm)")
-    print("No marker needed: the arm moves through ~16 poses in front of the OAK-D and opens/closes the "
-          "gripper at each one, so the camera finds the gripper by itself. Keep the area clear and "
-          "nothing else moving in front of the robot.")
+    msg = f"Floor: OAK-D is {h * 100:.1f} cm above it, tilted {tilt:.1f} deg down, roll {roll:+.1f} deg (floor flat to {fl[2] * 1000:.1f} mm)"
+    print(msg)
+    r.note(msg)
+    print("The arm visits poses in front of the robot and opens/closes the gripper at each, so the OAK-D "
+          "finds the gripper by itself (no marker). Keep the area clear and nothing else moving.")
     input("Ready? Enter. ")
-    cam_pts, grip_T = [], []
+    pixels, depth_pts, grip_T, tried, seen_any = [], {}, [], 0, False
     with Arm() as arm:
         roll0 = arm.level_roll()
         table = cfg["table_z"]
-        # 30 poses: more sightings average out the jaw's few-mm noise (simulated: 16 -> 30 poses,
-        # 4.5 -> 3.7 mm median with the floor constraint)
-        poses = [(x, y, table + hh, 0.0) for hh in (0.06, 0.14, 0.22) for x in (0.15, 0.20, 0.25)
-                 for y in (-0.08, 0.0, 0.08)]
-        poses += [(0.20, 0.0, table + 0.12, np.radians(r)) for r in (-40, 40, -20)]   # roll variety
+        poses = calibration_poses(table)
+        if test:
+            poses = [poses[k] for k in (0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33)]
         for i, (x, y, z, dr) in enumerate(poses):
-            try:
-                arm.move_tip([x, y, z], roll=roll0 + dr)
-            except Exception as e:     # noqa: BLE001 - unreachable pose: skip it
-                print(f"  pose {i + 1}: skipped ({str(e)[:60]})")
+            reached = None
+            for lean in (0.0, -0.5, -0.9):     # far poses: lean the gripper forward (no need to point down)
+                try:
+                    arm.move_tip([x, y, z], roll=roll0 + dr, tilt=lean)
+                    reached = lean
+                    break
+                except Exception as e:     # noqa: BLE001 - try the next lean
+                    err = str(e)
+            if reached is None:
+                print(f"  pose {i + 1}: skipped, cannot reach ({err[:50]})")
+                r.log("poses", pose=i + 1, x=x, y=y, z=z, result="unreachable")
                 continue
-            time.sleep(0.5)
+            time.sleep(0.4)
             q = arm.joints()
-            p, m = find_jaw(arm, oak)
-            img, _ = oak.read(1)
-            vis = img.copy()
-            vis[m > 0] = (vis[m > 0] * 0.4 + np.array([0, 200, 0]) * 0.6).astype(np.uint8)
-            f.show(vis, f"calibration pose {i + 1}/{len(poses)}: {'gripper found' if p is not None else 'gripper NOT found'}")
-            if p is None:
-                print(f"  pose {i + 1}: gripper not found (out of view, or something else moved)")
-                continue
-            cam_pts.append(p)
-            grip_T.append(arm.kin.fk(q, "gripper_link"))
-            print(f"  pose {i + 1}: gripper at {np.round(p * 100, 1)} cm from the OAK-D")
+            tip = arm.kin.fk(q, "gripper_link")[:3, 3]
+            pix, p, pic, info = find_jaw(arm, oak)
+            tried += 1
+            seen_any |= info.get("colour_px", 0) > 300 or info.get("blob_px", 0) >= 120
+            label = f"pose {i + 1}/{len(poses)} at ({x * 100:.0f},{y * 100:+.0f},{(z - table) * 100:.0f} cm above floor)"
+            r.video("calibrate", pic, [label])
+            r.snap(f"pose{i + 1:02d}", pic)
+            f.show(pic, f"{label}: {'found' if pix is not None else info['why']}")
+            r.log("poses", pose=i + 1, x=x, y=y, z=z, lean=reached, result="found" if pix is not None else info["why"],
+                  colour_px=info.get("colour_px"), blob_px=info.get("blob_px"), pix=info.get("pix"),
+                  depth_valid=info.get("depth_valid"), dist_m=info.get("dist_m"),
+                  cam=None if p is None else np.round(p, 4).tolist(), tip=np.round(tip, 4).tolist(),
+                  q_deg=np.round(np.degrees(q), 2).tolist())
+            if pix is None:
+                print(f"  {label}: not found - {info['why']}")
+            else:
+                if p is not None:
+                    depth_pts[len(pixels)] = p
+                pixels.append(pix)
+                grip_T.append(arm.kin.fk(q, "gripper_link"))
+                print(f"  {label}: found at pixel ({pix[0]:.0f},{pix[1]:.0f})"
+                      + (f", depth {info['dist_m'] * 100:.0f} cm" if p is not None else ""))
+            if tried == 8 and not seen_any:
+                print("\nThe OAK-D saw no gripper movement at all in 8 poses: the arm is not in its view here. "
+                      "Stopping. Look at the recording (iro review) to see what the OAK-D sees.")
+                r.note("stopped early: no movement seen in 8 poses")
+                break
         arm.gripper(False)
         arm.move_tip([0.20, 0.0, table + 0.15])
     oak.close()
-    if len(cam_pts) < 6:
-        print(f"Only {len(cam_pts)} poses found the gripper (need 6+). Check the OAK-D sees the area in front "
-              "of the arm (iro efad see), and that nothing else moved.")
+    r.note(f"{len(pixels)} of {tried} poses found the gripper ({len(depth_pts)} with depth)")
+    np.savez(r.dir / "sightings.npz", pixels=np.array(pixels), grip_T=np.array(grip_T), K=oak.K,
+             floor_n=fl[0], floor_d=fl[1], table=table,
+             depth_idx=np.array(list(depth_pts), int), depth_pts=np.array(list(depth_pts.values())).reshape(-1, 3))
+    if test:
+        print(f"\nTest: the gripper was found at {len(pixels)} of {tried} poses "
+              f"({len(depth_pts)} also with depth). Recording: {r.dir}")
+        return 0 if len(pixels) >= 4 else 1
+    if len(pixels) < 10:
+        print(f"Only {len(pixels)} poses found the gripper (need 10+). Recording: {r.dir} (iro review)")
         return 1
-    T, off, rms, res = solve_with_floor(cam_pts, grip_T, fl[0], fl[1], table)
-    bad = [i for i, r in enumerate(res) if r > 3 * max(rms, 0.004)]
-    if bad and len(cam_pts) - len(bad) >= 6:       # one bad sighting must not spoil it
-        keep = [i for i in range(len(cam_pts)) if i not in bad]
-        T, off, rms, res = solve_with_floor([cam_pts[i] for i in keep], [grip_T[i] for i in keep], fl[0], fl[1], table)
-    free = solve_calibration(cam_pts, grip_T)[0]   # without the floor: must roughly agree
-    disagree = float(np.linalg.norm(free[:3, 3] - T[:3, 3]))
-    # independent check: the gripper sightings alone (no floor) must put the camera nearly there too
-    print(f"\nOAK-D position in the arm frame: {np.round(T[:3, 3] * 100, 1)} cm; fit error {rms * 1000:.1f} mm "
-          f"({len(res)} poses); the point found sits {np.round(off * 100, 1)} cm from the gripper joint")
-    print(f"Check: gripper sightings alone put the OAK-D {disagree * 100:.1f} cm from that (should be < 2.5 cm)")
-    if rms > 0.012 or disagree > 0.025:
-        print("Not saved: the fit or the floor check is off. Run again with nothing moving in view; if it "
-              "repeats, send me the output.")
+    T, off, rms, per = solve_pixels(pixels, grip_T, oak.K, fl[0], fl[1], table, depth_pts)
+    bad = [i for i, e in enumerate(per) if e > 3 * max(rms, 4.0)]
+    if bad and len(pixels) - len(bad) >= 10:       # one bad sighting must not spoil it
+        keep = [i for i in range(len(pixels)) if i not in bad]
+        dp = {keep.index(i): v for i, v in depth_pts.items() if i in keep}
+        T, off, rms, per = solve_pixels([pixels[i] for i in keep], [grip_T[i] for i in keep], oak.K, fl[0], fl[1], table, dp)
+        r.note(f"dropped {len(bad)} outlier sightings: poses {bad}")
+    out = (f"OAK-D position in the arm frame: {np.round(T[:3, 3] * 100, 1)} cm, looking "
+           f"{np.degrees(np.arctan2(T[1, 2], T[0, 2])):+.0f} deg from straight ahead; picture fit {rms:.1f} px "
+           f"({len(per)} poses); the jaw point sits {np.round(off * 100, 1)} cm from the gripper joint")
+    print("\n" + out)
+    r.note(out)
+    if rms > 8:
+        print("Not saved: the picture fit is worse than 8 px. Recording: " + str(r.dir))
         return 1
     CALIB.write_text(yaml.safe_dump({"T_base_cam": T.round(6).tolist(), "jaw_point": off.round(5).tolist(),
-                                     "rms_m": round(rms, 5), "poses": len(res),
+                                     "rms_px": round(rms, 2), "poses": len(per),
                                      "floor_cam": {"normal": fl[0].round(5).tolist(), "d": round(fl[1], 5)},
-                                     "check_without_floor_m": round(disagree, 4),
-                                     "date": time.strftime("%Y-%m-%d %H:%M"), "method": "markerless (jaw)"}))
+                                     "recording": str(r.dir),
+                                     "date": time.strftime("%Y-%m-%d %H:%M"), "method": "markerless: floor + jaw seen in the picture"}))
     print(f"Saved {CALIB.relative_to(ROOT)}. Next: iro efad see")
     return 0
 
@@ -471,7 +650,7 @@ def main():
     if a[0] == "check":
         return cmd_check()
     if a[0] == "calibrate":
-        return cmd_calibrate()
+        return cmd_calibrate(test="--test" in a)
     if a[0] == "pick" and len(a) >= 2:
         return cmd_pick(a[1], dry_run="--dry-run" in a, drop="--drop" in a)
     print(__doc__)

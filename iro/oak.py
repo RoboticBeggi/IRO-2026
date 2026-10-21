@@ -49,7 +49,7 @@ class Oak:
         self.q = sync.out.createOutputQueue(maxSize=2, blocking=False)
         self.p.start()
         dev = self.p.getDefaultDevice()
-        try:   # a dropped link must fail fast: auto-reconnect buffered until Linux killed us (4.5 GB, 21 Oct)
+        try:   # a dropped link must fail fast instead of hanging in reconnect attempts
             dev.setMaxReconnectionAttempts(0)
         except Exception:   # noqa: BLE001 - older depthai
             pass

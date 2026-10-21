@@ -46,6 +46,7 @@ EFAD (Embedded Foundational Augmented Detection) - live view: http://localhost:8
   iro efad pick NAME      find NAME in 3D and pick it   (--dry-run, --drop)
   iro track [NAME]        the arm follows an object with the wrist camera (--watch, review)
   iro feed                the always-on live page: status / stop / restart / install (at boot)
+  iro review [RUN|list]   look back at a recorded run (every camera program records itself)
   iro object show NAME    INSTANT: show an object ~15 s and name it; recognised at once
   iro object add NAME     teach a new object: the arm films it from many angles, labels itself
   iro object train        train YOLO on all taught objects (10-20 min)
@@ -121,6 +122,7 @@ d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))"
     efad) exec python -u -m iro.efad "$@" ;;
     track) exec python -u -m iro.track "$@" ;;
     feed) exec python -m iro.stream "$@" ;;
+    review) exec python -m iro.record "$@" ;;
     object) exec python -m iro.objects "$@" ;;
 
     hw) [ "${1:-snapshot}" = snapshot ] || die "usage: iro hw snapshot"; exec python -m iro.hwsnap ;;

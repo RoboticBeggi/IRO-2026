@@ -8,8 +8,9 @@
     iro track                  no name: wiggle any object in front of the camera to pick it
     iro track --remember NAME  follow it AND save it as NAME
 
-Every run is RECORDED: ~/iro-runs/<time>_<name>/run.mp4 (annotated: boxes, search window,
-match heat map, why sightings were rejected) + log.csv. ~/iro-runs/latest points to the newest.
+Every run is RECORDED (iro/record.py): ~/iro-runs/<time>_track-<name>/track.mp4 (annotated:
+boxes, search window, match heat map, why sightings were rejected), feed.mp4 (the live page)
+and log.csv. ~/iro-runs/latest points to the newest; `iro review` works for every program.
 Live view: http://localhost:8080 (green = locked, yellow = coasting, red = lost).
 Ctrl+C = stop and hold the pose.
 
@@ -49,7 +50,6 @@ import numpy as np
 from iro import ROOT
 
 MODEL = ROOT / "models" / "vittrack.onnx"
-RUNS = Path.home() / "iro-runs"                      # recorded runs (video + log), newest 15 kept
 STEP_MAX = np.radians(1.5)
 LAG_MAX = np.radians(4.0)          # a command may lead the measured joint by this much
 GAIN = 0.25
@@ -367,26 +367,15 @@ def steering(arm, cam, q0, remeasure=False):
 
 
 class Recorder:
-    """Records an annotated video of a run (what the robot saw AND what it decided), for review."""
-    FPS = 15
+    """The annotated tracking video (boxes, search window, heat map, why sightings were rejected),
+    written into this run's recording (iro/record.py) next to the plain live-page video."""
 
     def __init__(self, name):
-        RUNS.mkdir(exist_ok=True)
-        for old in sorted(p for p in RUNS.iterdir() if p.is_dir() and not p.is_symlink())[:-14]:
-            import shutil
-            shutil.rmtree(old, ignore_errors=True)
-        self.dir = RUNS / f"{time.strftime('%Y%m%d-%H%M%S')}_{name}"
-        self.dir.mkdir()
-        latest = RUNS / "latest"
-        if latest.is_symlink() or latest.exists():
-            latest.unlink()
-        latest.symlink_to(self.dir.name)
-        self.vw, self.t, self.t0 = None, 0.0, time.time()
+        from iro.record import run
+        self.r = run(f"track-{name}")
+        self.dir = self.r.dir
 
     def add(self, frame, pm, box, window, lines, pred=None, vit=None, color=(0, 255, 0)):
-        if time.time() - self.t < 1 / self.FPS:
-            return
-        self.t = time.time()
         h, w = frame.shape[:2]
         v = frame.copy()
         if window is not None:
@@ -399,67 +388,30 @@ class Recorder:
             cv2.circle(v, (int(pred[0]), int(pred[1])), 5, (0, 0, 255), -1)
         cv2.drawMarker(v, (w // 2, h // 2), (255, 255, 0), cv2.MARKER_CROSS, 24, 1)
         if pm is not None and pm.last is not None:                  # heat map of the last search, top right
-            s = pm.last[0]
-            heat = cv2.applyColorMap(np.uint8(np.clip(s / 0.4, 0, 1) * 255), cv2.COLORMAP_JET)
-            heat = cv2.resize(heat, (160, 120), interpolation=cv2.INTER_NEAREST)
-            v[0:120, w - 160:w] = heat
+            heat = cv2.applyColorMap(np.uint8(np.clip(pm.last[0] / 0.4, 0, 1) * 255), cv2.COLORMAP_JET)
+            v[0:120, w - 160:w] = cv2.resize(heat, (160, 120), interpolation=cv2.INTER_NEAREST)
             cv2.rectangle(v, (w - 160, 0), (w - 1, 119), (255, 255, 255), 1)
-        lines = [f"{time.time() - self.t0:6.2f}s"] + [str(x) for x in lines]
-        for i, txt in enumerate(lines):
-            y = h - 10 - 20 * (len(lines) - 1 - i)
-            cv2.putText(v, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3)
-            cv2.putText(v, txt, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        if self.vw is None:
-            self.vw = cv2.VideoWriter(str(self.dir / "run.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), self.FPS, (w, h))
-        self.vw.write(v)
-
-    def close(self):
-        if self.vw is not None:
-            self.vw.release()
-        print(f"Recorded: {self.dir}/run.mp4   (review: iro track review)")
+        self.r.video("track", v, lines)
 
 
-def review(run=None, every=0.5, per_sheet=12):
-    """Contact sheets (frames every `every` s, 4 x 3 per sheet) + a summary of the log."""
-    d = Path(run) if run else (RUNS / "latest").resolve()
-    if not (d / "run.mp4").exists():
-        print(f"no recording in {d}")
-        return 1
-    cap = cv2.VideoCapture(str(d / "run.mp4"))
-    fps = cap.get(cv2.CAP_PROP_FPS) or Recorder.FPS
-    step = max(1, int(round(fps * every)))
-    tiles, sheets, i = [], [], 0
-    while True:
-        ok, f = cap.read()
-        if not ok:
-            break
-        if i % step == 0:
-            tiles.append(cv2.resize(f, (320, 240)))
-        i += 1
-    for k in range(0, len(tiles), per_sheet):
-        group = tiles[k:k + per_sheet]
-        group += [np.zeros_like(tiles[0])] * (per_sheet - len(group))
-        sheet = np.vstack([np.hstack(group[r * 4:(r + 1) * 4]) for r in range(per_sheet // 4)])
-        out = d / f"sheet_{k // per_sheet:02d}.jpg"
-        cv2.imwrite(str(out), sheet, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        sheets.append(out)
-    print(f"{d.name}: {i} recorded frames, {len(sheets)} contact sheets (real time is printed on each frame):")
-    for s in sheets:
-        print("  ", s)
+def review(which=None):
+    """Contact sheets + the tracking summary (states, rejections, joint travel)."""
+    from iro.record import RUNS
+    from iro.record import review as general
+    d = Path(which) if which and Path(which).exists() else ((RUNS / which) if which else (RUNS / "latest").resolve())
+    general(str(d))
     log = d / "log.csv"
     if log.exists():
         import csv
         rows = list(csv.DictReader(open(log)))
         if rows:
-            states = {}
+            states, whys = {}, {}
             for r in rows:
                 states[r["state"]] = states.get(r["state"], 0) + 1
-            whys = {}
-            for r in rows:
                 if r["why"]:
                     k = r["why"].split(" (")[0].split(" 0")[0]
                     whys[k] = whys.get(k, 0) + 1
-            print(f"  {float(rows[-1]['t']):.1f} s tracked; states:", ", ".join(f"{k} {100 * v / len(rows):.0f}%" for k, v in states.items()))
+            print(f"  {float(rows[-1]['t']):.1f} s tracked; states: " + ", ".join(f"{k} {100 * v / len(rows):.0f}%" for k, v in states.items()))
             print("  rejections:", ", ".join(f"{k} x{v}" for k, v in sorted(whys.items(), key=lambda kv: -kv[1])[:6]) or "none")
             print(f"  lift {rows[0]['lift_deg']} -> {rows[-1]['lift_deg']} deg, wrist {rows[0]['wrist_deg']} -> "
                   f"{rows[-1]['wrist_deg']} deg, pan {rows[0]['pan_deg']} -> {rows[-1]['pan_deg']} deg")
@@ -599,7 +551,6 @@ def main():
         print(f"STOPPED: {e}. The arm holds its pose.")
     finally:
         cam.release()
-        rec_v.close()
         if a.remember and lock is not None:
             rec.memory.add(a.remember.replace(" ", "_"), lock.looks)
             lock.pm.save(a.remember.replace(" ", "_"))
