@@ -211,22 +211,52 @@ def cmd_teach(name, views=len(TOUR)):
     return 0 if done else 1
 
 
+def gray_small(img):
+    """Grey 160x120 copy for picture_shift."""
+    return np.float32(cv2.cvtColor(cv2.resize(img, (160, 120), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY))
+
+
+_HANN = cv2.createHanningWindow((160, 120), cv2.CV_32F)
+
+
+def picture_shift(a, b, width):
+    """How far the whole picture moved from a to b (gray_small images), in pixels of a
+    `width`-wide camera picture, and how sure (0..1)."""
+    (dx, dy), resp = cv2.phaseCorrelate(a, b, _HANN)
+    return np.array([dx, dy]) * width / 160, resp
+
+
+def fresh(cam, n=3):
+    """A frame certainly taken after now: skip the ones that may still sit in the camera queue."""
+    for _ in range(n):
+        f = cam.latest()
+    return f
+
+
 def flow_jacobian(arm, cam, q0, joints=(0, 3), step_deg=6):
     """How the WHOLE picture shifts per radian of each joint (2 x len(joints)), from small nudges.
-    Uses the static room (phase correlation), so the object does not need to stay still."""
+    Uses the static room (phase correlation), so the object does not need to stay still.
+    Each joint is nudged + and - from q0: the two shifts must point opposite ways, otherwise
+    the pictures were stale or the room moved, and (None, reason) is returned."""
     J = np.zeros((2, len(joints)))
     for k, j in enumerate(joints):
-        shots = []
+        arm.move_joints(q0, duration=0.6)
+        time.sleep(0.3)
+        f = fresh(cam)
+        base, width = gray_small(f), f.shape[1]
+        d = {}
         for sign in (+1, -1):
             q = q0.copy()
             q[j] += sign * np.radians(step_deg)
             arm.move_joints(q, duration=0.6)
-            time.sleep(0.4)
-            shots.append(np.float32(cv2.cvtColor(cam.latest(), cv2.COLOR_BGR2GRAY)))
-        (dx, dy), resp = cv2.phaseCorrelate(shots[1], shots[0])
-        J[:, k] = np.array([dx, dy]) / np.radians(2 * step_deg)
+            time.sleep(0.3)
+            d[sign], _ = picture_shift(base, gray_small(fresh(cam)), width)
         arm.move_joints(q0, duration=0.6)
-    return J
+        if np.dot(d[+1], d[-1]) > -0.3 * np.linalg.norm(d[+1]) * np.linalg.norm(d[-1]) or min(
+                np.linalg.norm(d[+1]), np.linalg.norm(d[-1])) < 10:
+            return None, f"joint {j}: +/-{step_deg} deg moved the picture {d[+1].round()} / {d[-1].round()} px (should be opposite)"
+        J[:, k] = (d[+1] - d[-1]) / np.radians(2 * step_deg)
+    return J, ""
 
 
 def main():

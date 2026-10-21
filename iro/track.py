@@ -25,6 +25,9 @@ SMOOTH CONTROL (visual-servoing practice for camera + servo latency):
     (stacking is what made it swing left-right), at 15 Hz with a low-pass on the error
   - deadband with hysteresis (start moving > 22 px off, stop < 10 px)
   - if the error keeps flipping sign (overshoot), the gain halves automatically
+  - the steering is CHECKED all the time against how the whole picture really moves
+    (uncalibrated visual servoing, Broyden update): if it disagrees 3 times in a row it is
+    corrected on the spot; if the object still runs away from the centre, the arm stops
 
 Failsafes: steps <= 1.5 deg, calibrated joint limits, gripper never points below 3 cm above the
 floor, watchdog (load > 85% x3, 60 C, servo error) freezes the arm.
@@ -287,6 +290,53 @@ def acquire(pm, cam, name, tries=150):
             return f, box
 
 
+class SteerCheck:
+    """Compares the steering J with how the whole picture really moved (phase correlation over
+    ~0.2 s windows, measured joints) and corrects J when they keep disagreeing (Broyden update,
+    as in uncalibrated visual servoing, Jagersand 1997)."""
+    WINDOW = 0.2
+
+    def __init__(self, J):
+        self.J, self.ref, self.bad, self.good_after_fix, self.fixed = J.copy(), None, 0, 0, False
+
+    def update(self, frame, q):
+        """frame + measured (pan, wrist); returns a message when J was corrected."""
+        from iro.lockon import gray_small, picture_shift
+        now = time.time()
+        if self.ref is None or now - self.ref[2] < self.WINDOW:
+            if self.ref is None:
+                self.ref = (gray_small(frame), q.copy(), now)
+            return None
+        g = gray_small(frame)
+        shift, sure = picture_shift(self.ref[0], g, frame.shape[1])
+        dq = q - self.ref[1]
+        self.ref = (g, q.copy(), now)
+        pred = self.J @ dq
+        if sure < 0.08 or np.linalg.norm(dq) < np.radians(0.6) or np.linalg.norm(pred) < 6:
+            return None                                       # arm barely moved: nothing to learn
+        if np.dot(pred, shift) > 0:
+            self.bad = 0
+            if self.fixed:
+                self.good_after_fix += 1
+            return None
+        if np.linalg.norm(shift) < 3:
+            return None
+        self.bad += 1
+        if self.bad < 3:
+            return None
+        self.J = self.J + np.outer(shift - pred, dq) / dq.dot(dq)       # Broyden: now J @ dq == shift
+        self.bad, self.fixed, self.good_after_fix = 0, True, 0
+        return (f"steering corrected from what the camera saw: pan {np.round(self.J[:, 0] * np.radians(1), 1)} px/deg, "
+                f"wrist {np.round(self.J[:, 1] * np.radians(1), 1)} px/deg")
+
+    def save_if_confirmed(self):
+        import yaml
+        if self.fixed and self.good_after_fix >= 5 and abs(np.linalg.det(self.J)) > 1e3:
+            JCACHE.write_text(yaml.safe_dump({"J": self.J.round(2).tolist(), "date": time.strftime("%Y-%m-%d %H:%M"),
+                                              "source": "corrected while tracking"}))
+            print("  saved the corrected steering")
+
+
 def steering(arm, cam, q0, remeasure=False):
     """2x2: picture shift (px) per radian of pan and wrist bend, measured on the whole picture
     (the room does not move, so nothing has to be held still) and cached."""
@@ -294,7 +344,11 @@ def steering(arm, cam, q0, remeasure=False):
     from iro.lockon import flow_jacobian
     if JCACHE.exists() and not remeasure:
         return np.array(yaml.safe_load(JCACHE.read_text())["J"])
-    J = flow_jacobian(arm, cam, q0, joints=(PAN, WRIST))
+    print("  measuring the steering (small nudges of pan and wrist)...")
+    J, why = flow_jacobian(arm, cam, q0, joints=(PAN, WRIST))
+    if J is None:
+        print(f"  steering measurement failed: {why}")
+        return None
     ok = abs(J[0, 0]) > 1.5 * abs(J[1, 0]) and abs(J[1, 1]) > 1.5 * abs(J[0, 1]) and abs(np.linalg.det(J)) > 1e3
     print(f"  steering: pan moves the picture {np.round(J[:, 0] * np.radians(1), 1)} px/deg, "
           f"wrist {np.round(J[:, 1] * np.radians(1), 1)} px/deg  {'OK' if ok else 'LOOKS WRONG'}")
@@ -324,7 +378,7 @@ def main():
     rec = Recognizer()
     cam = open_camera()
     cam.status = "iro track: starting"
-    lock = None
+    lock, check = None, None
     try:
         with Arm() as arm:
             home = np.radians([0.0, 0.0, 0.0, 30.0, 0.0])
@@ -365,6 +419,7 @@ def main():
             t_start, q_log = time.time(), arm.joints()
             dog = Watchdog(arm)
             err_f, moving, gain, last_sign = np.zeros(2), False, GAIN, np.zeros(2)
+            check, away = SteerCheck(J), []          # away: (time, distance from centre) while moving
             n, nf, t_fps, fps, t_ctrl = 0, 0, time.time(), 0.0, 0.0
             while True:
                 reason = dog.check()
@@ -400,6 +455,13 @@ def main():
                 # control at CONTROL_HZ, from the measured joints
                 if time.time() - t_ctrl >= 1 / CONTROL_HZ:
                     t_ctrl = time.time()
+                    q_now = arm.joints()
+                    msg = check.update(f, q_now[[PAN, WRIST]])
+                    if msg:
+                        print("  " + msg)
+                        J = check.J
+                        Jinv = np.linalg.inv(J)
+                        gain, away = 0.08, []
                     target_px = centre(lock.box) if not lost else (lock.kf.x[:2] if coasting else None)
                     if target_px is not None:
                         err = target_px - np.array([w / 2, h / 2])
@@ -410,8 +472,15 @@ def main():
                         flips = np.sum((sign != last_sign) & (np.abs(err_f) > DEAD_OUT) & (last_sign != 0))
                         gain = max(0.08, gain * 0.5) if flips else min(GAIN, gain * 1.1)   # overshoot: back off
                         last_sign = sign
+                        # runaway guard: still getting further from the centre after 1.5 s of steering
+                        away = [(t, d) for t, d in away if t_ctrl - t < 1.5] + ([(t_ctrl, size)] if moving and not lost else [])
+                        if not moving or lost:
+                            away = []
+                        elif len(away) > 15 and away[-1][1] - away[0][1] > 120:
+                            raise MotionError(f"the {a.name or 'object'} kept running away from the centre while the arm "
+                                              f"followed it (steering wrong?). Re-measure: iro track {a.name or ''} --measure")
                         if moving:
-                            q_meas = arm.joints()
+                            q_meas = q_now
                             dq = np.clip(-gain * Jinv @ err_f, -STEP_MAX, STEP_MAX)
                             q_cmd = q_meas.copy()
                             q_cmd[PAN] += dq[0]
@@ -441,6 +510,8 @@ def main():
         print(f"STOPPED: {e}. The arm holds its pose.")
     finally:
         cam.release()
+        if check is not None:
+            check.save_if_confirmed()
         if a.remember and lock is not None:
             rec.memory.add(a.remember.replace(" ", "_"), lock.looks)
             lock.pm.save(a.remember.replace(" ", "_"))
