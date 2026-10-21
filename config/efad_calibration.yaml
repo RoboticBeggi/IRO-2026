@@ -1,0 +1,33 @@
+T_base_cam:
+- - 0.032998
+  - -0.52725
+  - 0.849069
+  - 0.115303
+- - -0.999412
+  - -0.009499
+  - 0.032942
+  - 0.010953
+- - -0.009304
+  - -0.849657
+  - -0.527253
+  - -0.013212
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+date: 2026-10-21 16:43
+floor_cam:
+  d: 0.11879
+  normal:
+  - -0.0093
+  - -0.84966
+  - -0.52725
+median_mm: 9.1
+method: 'markerless: floor + gripper tip seen in the picture'
+recording: /home/orin_nano/iro-runs/20261021-164320_efad-calibrate-from
+rms_px: 20.43
+sightings: 57
+tip_point:
+- -0.006
+- -0.00484
+- -0.13299

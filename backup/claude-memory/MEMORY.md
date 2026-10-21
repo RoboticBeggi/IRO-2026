@@ -1,2 +1,3 @@
 - [Jetson hardware state](jetson-hardware-state.md) — devices, venv, cuDSS quirk, SO-101 state on the Orin Nano
 - [Backup failsafe](backup-failsafe.md) — SSD died before; keep all state recoverable via repo + tools/backup.sh
+- [Record and review](record-and-review.md) — every camera/hardware run is recorded (~/iro-runs, iro review); review recordings before guessing
