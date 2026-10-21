@@ -102,7 +102,7 @@ def solve_calibration(cam_pts, grip_T):
 
 
 def cmd_calibrate():
-    from iro.motion import SEEDS, Arm
+    from iro.motion import Arm
     from iro.oak import Oak
     from iro.pick import pick_config
     from iro.stream import feed

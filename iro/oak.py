@@ -7,7 +7,6 @@ Coordinates are the camera's: x right, y down, z forward (metres).
 
 import time
 
-import cv2
 import numpy as np
 
 
