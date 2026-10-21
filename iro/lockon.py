@@ -55,6 +55,7 @@ class PatchMatcher:
         self.std = torch.tensor([0.229, 0.224, 0.225], device="cuda").view(1, 3, 1, 1)
         self.fg = torch.zeros((0, 384), device="cuda")
         self.bg = torch.zeros((0, 384), device="cuda")
+        self.ref_peak = 0.34         # typical peak of a real sighting (Tape, 21 Oct); set by reference()
 
     def patches(self, img):
         torch = self.torch
@@ -84,8 +85,11 @@ class PatchMatcher:
         sb = (t @ self.bg.T).topk(min(k, len(self.bg)), dim=-1).values.mean(-1) if len(self.bg) else 0 * sf
         return (sf - sb).cpu().numpy(), t
 
-    def locate(self, img, near=None, radius=None, thr=0.0):
-        """(box in pixels, strength) of the object, preferring a blob near `near`; None if absent."""
+    def locate(self, img, near=None, radius=None, thr=0.0, min_peak=None):
+        """(box in pixels, strength, peak) of the object, preferring a blob near `near`; None if absent.
+        A blob only counts if its best patch scores >= min_peak (default: half the object's own
+        typical score while it was taught): weak look-alikes such as shadows are ignored."""
+        min_peak = self.ref_peak * 0.5 if min_peak is None else min_peak
         s, t = self.score_map(img)
         n, lab, st, _ = cv2.connectedComponentsWithStats((s > thr).astype(np.uint8))
         if n <= 1:
@@ -97,23 +101,38 @@ class PatchMatcher:
             x, y, bw, bh = st[i, :4]
             box = np.array([x * sx, y * sy, (x + bw) * sx, (y + bh) * sy])
             strength = float(s[lab == i].sum())
+            peak = float(s[lab == i].max())
+            if peak < min_peak:
+                continue
             if near is not None and radius is not None:
                 c = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
                 if np.linalg.norm(c - near) > radius:
                     continue
             if best is None or strength > best[1]:
-                best = (box, strength, i)
+                best = (box, strength, i, peak)
         if best is None:
             return None
         # hard negatives: strong room patches outside the chosen blob teach "not this"
         outside = (lab != best[2]) & (s > thr)
         if outside.any():
             self.bg = self.torch.cat([self.bg, t[self.torch.from_numpy(outside).cuda()]])[-12000:]
-        return best[0], best[1]
+        return best[0], best[1], best[3]
+
+    def reference(self, views):
+        """The object's own typical peak score, from (picture, outline) pairs it was taught with."""
+        peaks = []
+        for img, mask in views:
+            s, _ = self.score_map(img)
+            m = self.small(mask > 0)
+            if m.any():
+                peaks.append(float(s[m].max()))
+        if peaks:
+            self.ref_peak = float(np.median(peaks))
 
     def save(self, name):
         BANKS.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(BANKS / f"{name}.patches.npz", fg=self.fg.cpu().numpy(), bg=self.bg.cpu().numpy())
+        np.savez_compressed(BANKS / f"{name}.patches.npz", fg=self.fg.cpu().numpy(), bg=self.bg.cpu().numpy(),
+                            ref_peak=self.ref_peak)
 
     def load(self, name):
         f = BANKS / f"{name}.patches.npz"
@@ -122,6 +141,7 @@ class PatchMatcher:
         d = np.load(f)
         self.fg = self.torch.from_numpy(d["fg"]).cuda()
         self.bg = self.torch.from_numpy(d["bg"]).cuda()
+        self.ref_peak = float(d["ref_peak"]) if "ref_peak" in d else 0.34
         return True
 
 
@@ -150,7 +170,7 @@ def cmd_teach(name, views=len(TOUR)):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     print(f"Teaching '{name}'. Open http://localhost:8080. For each step: do what it says, press Enter "
           "to FREEZE the picture, then DRAG a box around the object on the page.  'f' + Enter = finish.")
-    done = 0
+    done, views_taught = 0, []
     try:
         for i, step in enumerate(TOUR[:views]):
             cam.status = f"{i + 1}/{views}: {step} - then press Enter"
@@ -175,6 +195,7 @@ def cmd_teach(name, views=len(TOUR)):
                 continue
             cam.hold_until = 0
             pm.add_view(f, mask)
+            views_taught.append((f, mask))
             save_label(d, f"{stamp}_ann_p{i:02d}", f, tight, mask)
             rec.memory.add(name, rec.fp([crop(f, tight)]))
             done += 1
@@ -183,7 +204,9 @@ def cmd_teach(name, views=len(TOUR)):
         print()
     cam.release()
     if done:
+        pm.reference(views_taught)
         pm.save(name)
+        print(f"  its typical match strength: {pm.ref_peak:.2f} (sightings need >= {pm.ref_peak * 0.5:.2f})")
         print(f"\nLearnt {done} views of '{name}' ({len(pm.fg)} object patches). Try: iro track {name}")
     return 0 if done else 1
 

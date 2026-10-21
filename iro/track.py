@@ -130,7 +130,7 @@ class Lock:
 
     def refind(self, frame, near, radius):
         """Where the object is by patch matching, near the prediction (runs in a background thread)."""
-        return frame, self.pm.locate(frame, near=near, radius=radius)
+        return frame, self.pm.locate(frame, near=near, radius=radius, min_peak=self.pm.ref_peak * 0.35)
 
     def judge(self, result, track_ok):
         """Apply the gates to a re-find. Returns 'confirm', 'switch', or None (self.why says why)."""
@@ -139,7 +139,7 @@ class Lock:
             self.why = "not found near the predicted spot"
             self.pending = None
             return None
-        box, strength = found
+        box, strength, peak = found
         ratio = area(box) / area(self.box)
         if not 0.4 < ratio < 2.5:
             self.why = f"size x{ratio:.1f}"
@@ -251,6 +251,42 @@ def choose_target(rec, cam, input_fn=input):
 JCACHE = ROOT / "config" / "track_jacobian.yaml"
 
 
+def acquire(pm, cam, name, tries=150):
+    """Find the taught object: it must match strongly in 3 frames in a row at the same spot, then
+    the person confirms it on the live page (or draws the box). Returns (frame, box) or (None, None)."""
+    from iro.objects import draw_box
+    while True:
+        cam.status = f"looking for {name}... (show it to the camera)"
+        hist = []
+        for _ in range(tries):
+            f = cam.latest()
+            found = pm.locate(f)
+            if found is None:
+                hist = []
+                continue
+            hist.append((f, found[0]))
+            if len(hist) >= 3 and np.linalg.norm(centre(hist[-1][1]) - centre(hist[-3][1])) < 40:
+                break
+        else:
+            f = cam.latest()
+            hist = [(f, None)]
+        f, box = hist[-1]
+        shot = draw_box(f, box, (0, 255, 0), name) if box is not None else f
+        cam.flash(shot, ("Is this the " + name + "?  Enter = yes,  d = draw it,  r = look again") if box is not None
+                  else "Not found. d = draw a box around it,  r = look again", 600)
+        a = input(f"  {'Found it (live page): Enter = yes, ' if box is not None else 'Not found: '}"
+                  "d = draw the box yourself, r = look again: ").strip().lower()
+        cam.hold_until = 0
+        if a == "d":
+            cam.flash(f, "DRAG a box around the " + name, 600)
+            box = cam.feed.ask_box(f.shape, timeout=120)
+            cam.hold_until = 0
+            if box is not None:
+                return f, box
+        elif a != "r" and box is not None:
+            return f, box
+
+
 def steering(arm, cam, q0, remeasure=False):
     """2x2: picture shift (px) per radian of pan and wrist bend, measured on the whole picture
     (the room does not move, so nothing has to be held still) and cached."""
@@ -283,7 +319,7 @@ def main():
     from iro.hw.servos import BusyError
     from iro.instant import Recognizer
     from iro.motion import Arm, MotionError
-    from iro.objects import draw_box, grab, open_camera
+    from iro.objects import draw_box, open_camera
 
     rec = Recognizer()
     cam = open_camera()
@@ -303,12 +339,9 @@ def main():
                 if not pm.load(a.name):
                     print(f"'{a.name}' has not been taught yet: iro track teach {a.name}")
                     return 1
-                for _ in range(30):
-                    f = grab(cam)
-                    found = pm.locate(f)
-                    if found is not None:
-                        lock = Lock(rec, f, found[0], a.name, pm)
-                        break
+                f, box = acquire(pm, cam, a.name)
+                if box is not None:
+                    lock = Lock(rec, f, box, a.name, pm)
                 if lock is None:
                     print(f"Cannot see {a.name}. Show it to the wrist camera (live feed) and try again.")
                     return 1
