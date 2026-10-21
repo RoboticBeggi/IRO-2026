@@ -49,6 +49,10 @@ class Oak:
         self.q = sync.out.createOutputQueue(maxSize=2, blocking=False)
         self.p.start()
         dev = self.p.getDefaultDevice()
+        try:   # a dropped link must fail fast: auto-reconnect buffered until Linux killed us (4.5 GB, 21 Oct)
+            dev.setMaxReconnectionAttempts(0)
+        except Exception:   # noqa: BLE001 - older depthai
+            pass
         dev.setIrLaserDotProjectorIntensity(ir)
         cal = dev.readCalibration()
         self.K = np.array(cal.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, *size))
@@ -59,7 +63,13 @@ class Oak:
         """(colour BGR, depth mm). Depth is the per-pixel median of n frames (fills flicker holes)."""
         frames = []
         for _ in range(n):
-            m = self.q.get()
+            m, t0 = None, time.time()
+            while m is None:                      # never block forever: a dropped link must raise
+                m = self.q.tryGet()
+                if m is None:
+                    if time.time() - t0 > 3 or not self.p.isRunning():
+                        raise RuntimeError("OAK-D stopped sending pictures")
+                    time.sleep(0.005)
             img = m["rgb"].getCvFrame()
             frames.append(m["depth"].getFrame().astype(np.float32))
         d = np.stack(frames)
