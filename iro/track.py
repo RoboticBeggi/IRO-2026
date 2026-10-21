@@ -2,7 +2,9 @@
 
     iro track                  hold anything in the middle of the wrist camera view, press Enter
     iro track Tapak_Sirih      start on a remembered object (iro object show / iro efad show)
-    iro track --remember NAME  follow it AND save it to the instant memory as NAME (no training)
+    iro track --remember NAME  follow it AND save it as NAME (no training)
+  iro track teach NAME       BEST: guided tour, draw boxes on 10-12 views (iro/lockon.py)
+  iro track NAME --measure   re-measure the steering (after changing the camera mount)
 
 Live view: http://localhost:8080 (green = locked, yellow = coasting on prediction, red = lost).
 Ctrl+C = stop and hold the pose.
@@ -107,14 +109,16 @@ class Kalman:
 class Lock:
     """One locked target: tracker + Kalman + its own looks + the distractors around it."""
 
-    def __init__(self, rec, frame, box, name=None):
+    def __init__(self, rec, frame, box, name=None, pm=None):
         from iro.instant import crop
         self.rec, self.name, self.crop = rec, name, crop
+        if pm is None:                                   # build the patch matcher from this one view
+            from iro.lockon import PatchMatcher, sam_outline
+            from iro.objects import Refiner
+            pm = PatchMatcher()
+            pm.add_view(frame, sam_outline(Refiner(), frame, box))
+        self.pm = pm
         self.looks = rec.fp([crop(frame, box)])
-        others = [b for b in rec.things(frame) if iou(b, box) < 0.1]
-        self.distract = rec.fp([crop(frame, b) for b in others]) if others else np.zeros((0, 384), np.float32)
-        if len(rec.memory.background):                      # the room, as learnt before
-            self.distract = np.vstack([self.distract, rec.memory.background[-500:]])
         self.kf = Kalman(centre(box))
         self.pending = None                                  # candidate waiting for a 2nd confirmation
         self.reset(frame, box)
@@ -124,60 +128,33 @@ class Lock:
         self.tracker = new_tracker(frame, box)
         self.lost_since = None
 
-    def appearance(self, e):
-        """(similarity to this object, margin over the best distractor) per fingerprint."""
-        sim = (e @ self.looks.T).max(1)
-        if self.name is not None and self.rec.memory.objects.get(self.name) is not None:
-            sim = np.maximum(sim, (e @ self.rec.memory.objects[self.name].T).max(1))
-        neg = (e @ self.distract.T).max(1) if len(self.distract) else np.zeros(len(e))
-        return sim, sim - neg
-
-    def refind(self, frame):
-        """Candidates in view with their fingerprints (runs in a background thread)."""
-        boxes = self.rec.things(frame)
-        return frame, boxes, (self.rec.fp([self.crop(frame, b) for b in boxes]) if boxes else None)
+    def refind(self, frame, near, radius):
+        """Where the object is by patch matching, near the prediction (runs in a background thread)."""
+        return frame, self.pm.locate(frame, near=near, radius=radius)
 
     def judge(self, result, track_ok):
-        """Apply the gates to a re-find. Returns 'confirm', 'switch', or None."""
-        frame, boxes, e = result
-        self.why = "nothing found"
-        if not boxes:
-            return None
-        sim, margin = self.appearance(e)
-        lost_s = time.time() - self.lost_since if self.lost_since else 0.0
-        pred, radius = self.kf.x[:2], self.kf.gate_radius(lost_s)
-        ok = [i for i, b in enumerate(boxes)
-              if np.linalg.norm(centre(b) - pred) < radius
-              and 0.5 < area(b) / area(self.box) < 2.0
-              and sim[i] > 0.6 and margin[i] > (0.12 if lost_s else 0.06)]
-        # everything that looked like it but failed the gates is a distractor: remember it
-        near_miss = [i for i in range(len(boxes)) if i not in ok and sim[i] > 0.55 and iou(boxes[i], self.box) < 0.1]
-        if near_miss:
-            self.distract = np.vstack([self.distract, e[near_miss]])[-1500:]
-        if not ok:
+        """Apply the gates to a re-find. Returns 'confirm', 'switch', or None (self.why says why)."""
+        frame, found = result
+        if found is None:
+            self.why = "not found near the predicted spot"
             self.pending = None
-            near = [i for i in range(len(boxes)) if np.linalg.norm(centre(boxes[i]) - pred) < radius]
-            if not near:
-                self.why = "nothing near the predicted spot"
-            else:
-                k = max(near, key=lambda j: sim[j])
-                self.why = (f"best nearby: look {sim[k]:.2f} margin {margin[k]:+.2f} "
-                            f"size x{area(boxes[k]) / area(self.box):.1f}")
             return None
-        i = max(ok, key=lambda k: margin[k])
-        b = boxes[i]
-        if track_ok and iou(b, self.box) > 0.4:
+        box, strength = found
+        ratio = area(box) / area(self.box)
+        if not 0.4 < ratio < 2.5:
+            self.why = f"size x{ratio:.1f}"
             self.pending = None
-            if margin[i] > 0.1:
-                self.looks = np.vstack([self.looks, e[i:i + 1]])[-80:]   # tracker and EFAD agree: learn
+            return None
+        if track_ok and iou(box, self.box) > 0.3:
+            self.pending = None
+            self.why = ""
             return "confirm"
-        # disagreement or lost: need the same candidate twice in a row before jumping to it
-        if self.pending is not None and iou(self.pending, b) > 0.3:
+        if self.pending is not None and iou(self.pending, box) > 0.3:   # same place twice: trust it
             self.pending = None
-            self.reset(frame, b)
-            self.kf.update(centre(b))
+            self.reset(frame, box)
+            self.kf.update(centre(box))
             return "switch"
-        self.pending = b
+        self.pending = box
         self.why = "waiting for a 2nd confirmation"
         return None
 
@@ -259,7 +236,7 @@ def choose_target(rec, cam, input_fn=input):
             print("  Could not find it. Try again, wiggle a little more (but keep it in view).")
             continue
         # snap to the finder's tighter box if one sits on the wiggle area
-        cands = [b for b in rec.things(f) if iou(b, box) > 0.3]
+        cands = [b for b in rec.things(f) if iou(b, box) > 0.3 and area(b) < 1.5 * area(box)]
         if cands:
             box = max(cands, key=lambda b: iou(b, box))
         shot = draw_box(f, box, (0, 255, 0), "target?")
@@ -271,36 +248,23 @@ def choose_target(rec, cam, input_fn=input):
             return f, box
 
 
-def measure_jacobian(arm, cam, lock, q0):
-    """Pixels the object moves per radian of pan and of wrist bend (2x2), from small nudges."""
-    from iro.objects import grab
-    J = np.zeros((2, 2))
-    for k, joint in enumerate((PAN, WRIST)):
-        pts = []
-        for sign in (+1, -1):
-            q = q0.copy()
-            q[joint] += sign * np.radians(7)
-            arm.move_joints(q, duration=0.6)
-            time.sleep(0.3)
-            ok, b = lock.tracker.update(grab(cam))
-            if not ok:
-                return None
-            pts.append(np.array([b[0] + b[2] / 2, b[1] + b[3] / 2]))
-        J[:, k] = (pts[0] - pts[1]) / np.radians(14)
-        arm.move_joints(q0, duration=0.6)
-        time.sleep(0.3)
-        ok, b = lock.tracker.update(grab(cam))
-        if ok:
-            lock.box = np.array([b[0], b[1], b[0] + b[2], b[1] + b[3]], float)
-            lock.kf = Kalman(centre(lock.box))
-    # pan must move the picture mostly sideways, wrist bend mostly up/down; otherwise the target
-    # moved during the nudges (or was not the object) and steering would go the wrong way
-    sideways_ok = abs(J[0, 0]) > 1.5 * abs(J[1, 0])
-    updown_ok = abs(J[1, 1]) > 1.5 * abs(J[0, 1])
-    print(f"  measured: pan moves the picture {np.round(J[:, 0] * np.radians(1), 1)} px/deg, "
-          f"wrist {np.round(J[:, 1] * np.radians(1), 1)} px/deg")
-    if abs(np.linalg.det(J)) < 1e3 or not (sideways_ok and updown_ok):
+JCACHE = ROOT / "config" / "track_jacobian.yaml"
+
+
+def steering(arm, cam, q0, remeasure=False):
+    """2x2: picture shift (px) per radian of pan and wrist bend, measured on the whole picture
+    (the room does not move, so nothing has to be held still) and cached."""
+    import yaml
+    from iro.lockon import flow_jacobian
+    if JCACHE.exists() and not remeasure:
+        return np.array(yaml.safe_load(JCACHE.read_text())["J"])
+    J = flow_jacobian(arm, cam, q0, joints=(PAN, WRIST))
+    ok = abs(J[0, 0]) > 1.5 * abs(J[1, 0]) and abs(J[1, 1]) > 1.5 * abs(J[0, 1]) and abs(np.linalg.det(J)) > 1e3
+    print(f"  steering: pan moves the picture {np.round(J[:, 0] * np.radians(1), 1)} px/deg, "
+          f"wrist {np.round(J[:, 1] * np.radians(1), 1)} px/deg  {'OK' if ok else 'LOOKS WRONG'}")
+    if not ok:
         return None
+    JCACHE.write_text(yaml.safe_dump({"J": J.round(2).tolist(), "date": time.strftime("%Y-%m-%d %H:%M")}))
     return J
 
 
@@ -308,6 +272,10 @@ def main():
     p = argparse.ArgumentParser(prog="iro track", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("name", nargs="?")
     p.add_argument("--remember", metavar="NAME")
+    p.add_argument("--measure", action="store_true", help="re-measure the steering (camera mount changed)")
+    if len(sys.argv) > 2 and sys.argv[1] == "teach":
+        from iro.lockon import cmd_teach
+        return cmd_teach(sys.argv[2])
     a = p.parse_args()
 
     from concurrent.futures import ThreadPoolExecutor
@@ -329,12 +297,17 @@ def main():
 
             # 1. lock on
             if a.name:
+                from iro.lockon import PatchMatcher
                 cam.status = f"looking for {a.name}"
-                for _ in range(20):
+                pm = PatchMatcher()
+                if not pm.load(a.name):
+                    print(f"'{a.name}' has not been taught yet: iro track teach {a.name}")
+                    return 1
+                for _ in range(30):
                     f = grab(cam)
-                    hit = [d for d in rec.recognize(f) if d[0] == a.name]
-                    if hit:
-                        lock = Lock(rec, f, hit[0][3], a.name)
+                    found = pm.locate(f)
+                    if found is not None:
+                        lock = Lock(rec, f, found[0], a.name, pm)
                         break
                 if lock is None:
                     print(f"Cannot see {a.name}. Show it to the wrist camera (live feed) and try again.")
@@ -342,18 +315,13 @@ def main():
             else:
                 f, box = choose_target(rec, cam)
                 lock = Lock(rec, f, box, a.remember)
-            print(f"Locked ({len(lock.distract)} distractors noted). Hold it still ~3 s while the arm measures...")
-            cam.status = "hold still: measuring"
-            q0 = arm.joints()
-            J = measure_jacobian(arm, cam, lock, q0)
+            print("Locked on.")
+            J = steering(arm, cam, arm.joints(), remeasure=a.measure)
             if J is None:
-                print("  that measurement looks wrong (did the object move?). Measuring again: hold it STILL...")
-                time.sleep(1.0)
-                J = measure_jacobian(arm, cam, lock, q0)
-            if J is None:
-                print("Could not measure reliably. Rest the object on something (or the floor) so it is "
-                      "perfectly still for the 4 s of measuring, and try again.")
+                print("Steering measurement looked wrong (the picture should shift sideways for pan and "
+                      "up/down for the wrist). Point the camera at a textured scene and run with --measure.")
                 return 1
+            lock.reset(cam.latest(), lock.box)
             Jinv = np.linalg.inv(J)
             print("Tracking. Move it slowly at first. Ctrl+C to stop.")
 
@@ -385,7 +353,8 @@ def main():
                 elif lock.lost_since is None:
                     lock.lost_since = time.time()
                 if job is None and (n % REDETECT_EVERY == 0 or lock.lost_since):
-                    job = pool.submit(lock.refind, f.copy())
+                    lost_s = time.time() - lock.lost_since if lock.lost_since else 0.0
+                    job = pool.submit(lock.refind, f.copy(), lock.kf.x[:2].copy(), lock.kf.gate_radius(lost_s))
                 verdict = ""
                 if job is not None and job.done():
                     verdict = lock.judge(job.result(), track_ok) or "rejected:" + lock.why
@@ -415,7 +384,10 @@ def main():
                             q_cmd[PAN] += dq[0]
                             q_cmd[WRIST] += dq[1]
                             sent = write_joints(arm, q_cmd)
-                            q_log = sent if sent is not None else q_log
+                            if sent is not None:
+                                q_log = sent
+                                # the whole picture will shift by J*dq: move the prediction with it
+                                lock.kf.x[:2] += J @ np.array([sent[PAN] - q_meas[PAN], sent[WRIST] - q_meas[WRIST]])
                 c_now = centre(lock.box)
                 log.write(f"{time.time() - t_start:.3f},{score:.2f},{int(ok)},{int(track_ok)},{int(lock.lost_since is not None)},"
                           f"{c_now[0]:.0f},{c_now[1]:.0f},{err_f[0]:.0f},{err_f[1]:.0f},{gain:.2f},"
@@ -438,9 +410,8 @@ def main():
         cam.release()
         if a.remember and lock is not None:
             rec.memory.add(a.remember.replace(" ", "_"), lock.looks)
-            if len(lock.distract):
-                rec.memory.add_background(lock.distract[-300:])
-            print(f"Remembered {len(lock.looks)} views as '{a.remember}' (+ room views as 'not this').")
+            lock.pm.save(a.remember.replace(" ", "_"))
+            print(f"Remembered '{a.remember}' ({len(lock.pm.fg)} object patches): iro track {a.remember}")
     return 0
 
 

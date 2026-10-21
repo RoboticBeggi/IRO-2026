@@ -13,17 +13,36 @@ import threading
 import cv2
 
 PORT = 8080
-PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><title>IRO camera</title>
+PAGE = b"""<!doctype html><html><head><meta charset="utf-8"><title>EFAD live</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{margin:0;background:#111;color:#ccc;font:15px system-ui;text-align:center}
-img{max-width:100%;height:auto;margin-top:6px}p{margin:6px}</style></head>
-<body><p>IRO wrist camera &middot; live</p><img id="v" src="/stream">
-<p id="s">waiting for a camera program (iro vision, iro object add, iro pick)...</p>
+#w{position:relative;display:inline-block;margin-top:6px;touch-action:none}
+img{max-width:100%;height:auto;display:block}
+#r{position:absolute;border:3px solid #0f0;display:none;pointer-events:none}p{margin:6px}</style></head>
+<body><p>EFAD live &middot; when asked, DRAG a box around the object on the picture</p>
+<div id="w"><img id="v" src="/stream" draggable="false"><div id="r"></div></div>
+<p id="s">waiting for a camera program (iro efad, iro track, iro object, iro pick)...</p>
 <script>
-const v=document.getElementById('v'), s=document.getElementById('s');
+const v=document.getElementById('v'), s=document.getElementById('s'), r=document.getElementById('r');
 v.onload=()=>{s.textContent=''};
-v.onerror=()=>{s.textContent='no camera program running - start one (e.g. iro vision); this page reconnects by itself';
+v.onerror=()=>{s.textContent='no camera program running; this page reconnects by itself';
   setTimeout(()=>{v.src='/stream?'+Date.now()},2000)};
+let a=null;
+function pos(e){const b=v.getBoundingClientRect(), p=e.touches?e.touches[0]:e;
+  return [Math.min(Math.max((p.clientX-b.left)/b.width,0),1), Math.min(Math.max((p.clientY-b.top)/b.height,0),1)]}
+function show(p,q){const b=v.getBoundingClientRect();r.style.display='block';
+  r.style.left=Math.min(p[0],q[0])*b.width+'px';r.style.top=Math.min(p[1],q[1])*b.height+'px';
+  r.style.width=Math.abs(q[0]-p[0])*b.width+'px';r.style.height=Math.abs(q[1]-p[1])*b.height+'px'}
+function down(e){e.preventDefault();a=pos(e);show(a,a)}
+function move(e){if(a){e.preventDefault();show(a,pos(e))}}
+function up(e){if(!a)return;const q=e.changedTouches?(()=>{const b=v.getBoundingClientRect(),t=e.changedTouches[0];
+  return [(t.clientX-b.left)/b.width,(t.clientY-b.top)/b.height]})():pos(e);
+  const box=[Math.min(a[0],q[0]),Math.min(a[1],q[1]),Math.max(a[0],q[0]),Math.max(a[1],q[1])];a=null;
+  if(box[2]-box[0]<0.02||box[3]-box[1]<0.02){r.style.display='none';return}
+  fetch('/box',{method:'POST',body:JSON.stringify(box)}).then(()=>{s.textContent='box sent';
+  setTimeout(()=>{r.style.display='none'},800)})}
+v.addEventListener('mousedown',down);window.addEventListener('mousemove',move);window.addEventListener('mouseup',up);
+v.addEventListener('touchstart',down);window.addEventListener('touchmove',move);window.addEventListener('touchend',up);
 </script></body></html>"""
 
 
@@ -31,6 +50,7 @@ class Feed:
     def __init__(self, port=PORT):
         self.jpg, self.cond = None, threading.Condition()
         self.port, self.server = port, None
+        self.box, self.box_event = None, threading.Event()    # last box drawn on the page (0-1 coords)
 
     def start(self):
         if self.server:
@@ -40,6 +60,18 @@ class Feed:
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
+
+            def do_POST(self):
+                if self.path.startswith("/box"):
+                    import json
+                    try:
+                        b = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                        feed.box = [float(v) for v in b][:4]
+                        feed.box_event.set()
+                    except (ValueError, TypeError):
+                        pass
+                self.send_response(204)
+                self.end_headers()
 
             def do_GET(self):
                 if self.path.startswith("/stream"):
@@ -95,6 +127,15 @@ class Feed:
         with self.cond:
             self.jpg = jpg
             self.cond.notify_all()
+
+    def ask_box(self, shape, timeout=None):
+        """Wait for the person to drag a box on the live page; returns it in pixels (x1,y1,x2,y2)."""
+        self.box_event.clear()
+        if not self.box_event.wait(timeout):
+            return None
+        h, w = shape[:2]
+        x1, y1, x2, y2 = self.box
+        return (x1 * w, y1 * h, x2 * w, y2 * h)
 
     def wait(self):
         with self.cond:
