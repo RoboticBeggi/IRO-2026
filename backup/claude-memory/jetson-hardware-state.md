@@ -5,7 +5,7 @@ metadata:
   node_type: memory
   type: project
   originSessionId: 1cabac2b-8711-4426-81e7-373cd5327053
-  modified: 2026-10-21T07:13:36.724Z
+  modified: 2026-10-21T07:28:04.000Z
 ---
 
 Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname `ubuntu`, MAXN_SUPER.
@@ -26,6 +26,7 @@ Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname 
 - Arm pick pipeline (iro/kinematics.py, iro/motion.py, iro/pick.py; `iro pick`): YOLO11n 30 fps on mono wrist cam; FK matches ROS TF exactly. SO-101 can point straight down only up to ~8 cm (wrist limit 95 deg); look pose leans 25 deg outward at 12 cm. Visual servoing with runtime image Jacobian; `iro pick teach` sets table_z/grasp_z/grasp_pixel. Not yet run on hardware (waits for recalibration).
 - 21 Oct 15:00: `iro track Tape` locked on correctly (patch matcher + confirm) but the cached steering had the wrist column REVERSED (+7 px/deg; physics: wrist tilting down → picture moves up, ~-13 px/deg), so the arm tilted away. Fixed: flow_jacobian takes fresh frames + requires +/- nudges to shift opposite ways; SteerCheck (Broyden) corrects J live; runaway guard stops the arm. Bad cache kept as config/track_jacobian.reversed-20261021.yaml.bak; next run re-measures.
 - 21 Oct 15:15: track rewrite. Root causes found: (a) control copied MEASURED (gravity-sagged) angles of ALL joints into each command → arm ratcheted downward; (b) VitTrack was trusted at score>0.25 and drifted onto the dark sofa shadow; (c) watchdog stopped on a single garbled 88 C read (real 42 C); (d) live Broyden steering correction thrashed (removed). New: matcher is the authority (zoomed search window), taught size/shape/brightness profile gates, scene negatives at lock-on, held-out ref_peak (Tape 0.34, bar 0.12; held-out 10/12 found, 0 false), motion only on fresh sighting, --watch mode, every run recorded to ~/iro-runs/<stamp>_<name>/run.mp4 + log.csv; `iro track review` makes contact sheets for Claude to inspect.
+- 21 Oct 15:25: FIRST SUCCESSFUL TRACKING (runs in ~/iro-runs/20261021-15*): locked 100% on Tape hand-held + floor, arm followed (pan -14.5, wrist 30→9). Only stops were false runaway-guard trips (also fired in --watch) → guard removed (an ego/J-based guard can't detect wrong J by construction; J validity is checked at measurement). Lost no longer exits. Live page is now an always-on helper (`iro feed`, iro/stream.py hub: programs POST /push, page polls /status and reconnects, standby frame when idle; crontab @reboot via `iro feed install`, installed).
 - Old lost project was named PUSAKA; see repo salvage/README.md.
 
 **Why:** a previous SSD death wiped the user's whole project, so recoverability matters most.
