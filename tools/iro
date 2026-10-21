@@ -41,8 +41,8 @@ EFAD (Embedded Foundational Augmented Detection) - live view: http://localhost:8
   iro efad see            OAK-D: names + 3D positions of remembered objects
   iro efad wrist          wrist camera + YOLO boxes   (same as: iro vision)
   iro efad show NAME      teach an object to the OAK-D in ~15 s (colour; what EFAD picks with)
-  iro efad marker         print-out for calibrating the OAK-D to the arm
-  iro efad calibrate      where the OAK-D sits relative to the arm (marker on the gripper)
+  iro efad calibrate      where the OAK-D sits relative to the arm (no marker: the gripper finds itself)
+  iro efad check          has the OAK-D moved since calibration? (floor check, 3 s)
   iro efad pick NAME      find NAME in 3D and pick it   (--dry-run, --drop)
   iro track [NAME]        the arm follows an object with the wrist camera (--watch, review)
   iro feed                the always-on live page: status / stop / restart / install (at boot)

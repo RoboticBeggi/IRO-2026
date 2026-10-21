@@ -3,8 +3,9 @@
     iro efad see            OAK-D live view: names + 3D position of remembered objects
     iro efad wrist          wrist-camera live view (was `iro vision`)
     iro efad show NAME      teach an object to the OAK-D (colour) in ~15 s, no training
-    iro efad marker         make the calibration marker to print
-    iro efad calibrate      find where the OAK-D sits relative to the arm (marker on the gripper)
+    iro efad calibrate      find where the OAK-D sits relative to the arm (NO marker: the gripper
+                            opens/closes in front of it and is found by itself; the floor double-checks)
+    iro efad check          has the OAK-D moved since? (re-measures the floor, ~3 s)
     iro efad pick NAME      find NAME in 3D and pick it up      (--dry-run, --drop)
 
 How the pieces work together:
@@ -27,13 +28,7 @@ import yaml
 from iro import ROOT
 
 CALIB = ROOT / "config" / "efad_calibration.yaml"
-MARKER_ID, MARKER_MM = 0, 40
 SNAP = ROOT.parent / "efad-last.jpg"
-
-
-def aruco():
-    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
-    return d, cv2.aruco.ArucoDetector(d, cv2.aruco.DetectorParameters())
 
 
 def load_calib():
@@ -47,38 +42,84 @@ def to_base(T, p):
     return T[:3, :3] @ np.asarray(p) + T[:3, 3]
 
 
-# --- marker + calibration ------------------------------------------------------
+# --- calibration WITHOUT markers -------------------------------------------------
+#
+# 1. The floor: a plane fit to the OAK-D's depth gives its height, tilt and roll above the floor
+#    (tested 21 Oct: floor flat to 1.3 mm, height 11.8 cm vs 11.5 cm by tape measure).
+# 2. The gripper finds itself: at each arm pose the jaw opens and closes; the only thing that
+#    changes between the two pictures is the moving jaw, so the change, with its depth, is a
+#    3D point on the gripper. 12+ poses -> where the OAK-D sits relative to the arm.
+# 3. The floor fixes tilt, roll and height exactly (solve_with_floor); the gripper sightings
+#    only solve the rest. Checked: the sightings alone must put the camera within 2.5 cm.
+# `iro efad check` re-measures the floor at any time and says if the OAK-D mount has moved.
 
-def cmd_marker():
-    d, _ = aruco()
-    px = 600
-    img = np.full((px + 200, px + 200), 255, np.uint8)
-    img[100:100 + px, 100:100 + px] = cv2.aruco.generateImageMarker(d, MARKER_ID, px)
-    cv2.putText(img, f"EFAD marker: print so the BLACK square is {MARKER_MM} mm wide", (20, px + 170),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.9, 0, 2)
-    out = ROOT.parent / "efad-marker.png"
-    cv2.imwrite(str(out), img)
-    print(f"Saved {out}. Print it, check the black square measures {MARKER_MM} mm, and tape it flat on "
-          "the side of the gripper that faces the OAK-D (keep the white border).")
-    return 0
+def floor_plane(oak, depth, iters=300):
+    """(unit normal pointing up from the floor, distance) in camera coordinates, flatness rms (m),
+    or None. Uses the lower half of the picture (mostly floor) and RANSAC."""
+    h, w = depth.shape
+    mask = np.zeros(depth.shape, bool)
+    mask[h // 2:, :] = True
+    P = oak.points(depth, mask)[::5]
+    if len(P) < 500:
+        return None
+    rng, best = np.random.default_rng(0), None
+    for _ in range(iters):
+        s3 = P[rng.choice(len(P), 3, replace=False)]
+        n = np.cross(s3[1] - s3[0], s3[2] - s3[0])
+        if np.linalg.norm(n) < 1e-9:
+            continue
+        n /= np.linalg.norm(n)
+        inl = np.abs((P - s3[0]) @ n) < 0.01
+        if best is None or inl.sum() > best.sum():
+            best = inl
+    Q = P[best]
+    c = Q.mean(0)
+    n = np.linalg.svd(Q - c)[2][2]
+    if n[1] > 0:                       # camera y points down: the floor's "up" has negative y
+        n = -n
+    return n, float(-n @ c), float(np.sqrt(np.mean(((Q - c) @ n) ** 2)))
 
 
-def find_marker(img, oak):
-    """Marker centre in camera coordinates (metres) via its known size, or None."""
-    _, det = aruco()
-    corners, ids, _ = det.detectMarkers(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
-    if ids is None or MARKER_ID not in ids.flatten():
-        return None, None
-    c = corners[list(ids.flatten()).index(MARKER_ID)].reshape(4, 2)
-    s = MARKER_MM / 1000 / 2
-    obj = np.array([[-s, s, 0], [s, s, 0], [s, -s, 0], [-s, -s, 0]], np.float32)
-    ok, rvec, tvec = cv2.solvePnP(obj, c.astype(np.float32), oak.K, oak.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-    return (tvec.flatten() if ok else None), c
+def mount_from_floor(n, d):
+    """Height above the floor (m), tilt down and roll (deg) of the camera, from the floor plane."""
+    return abs(d), float(np.degrees(np.arcsin(abs(n[2])))), float(np.degrees(np.arctan2(n[0], -n[1])))
+
+
+def find_jaw(arm, oak):
+    """3D point (camera frame) of the moving jaw: difference of open vs closed pictures. Done
+    twice (open-close-open); both must agree within 1 cm. Returns (point, mask) or (None, mask)."""
+    shots = []
+    for opened in (True, False, True):
+        arm.gripper(opened, wait=0.7)
+        shots.append(oak.read(3))
+    pts, masks = [], []
+    for (ia, da), (ib, db) in ((shots[0], shots[1]), (shots[1], shots[2])):
+        both = (da > 0) & (db > 0)
+        moved = both & (np.abs(da.astype(np.float32) - db.astype(np.float32)) > 15)
+        moved |= cv2.absdiff(cv2.cvtColor(ia, cv2.COLOR_BGR2GRAY), cv2.cvtColor(ib, cv2.COLOR_BGR2GRAY)) > 35
+        m = cv2.morphologyEx(moved.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+        n, lab, st, _ = cv2.connectedComponentsWithStats(m)
+        if n <= 1:
+            return None, m
+        k = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+        if st[k, cv2.CC_STAT_AREA] < 150:
+            return None, m
+        blob = lab == k
+        near = np.where((da > 0) & ((db == 0) | (da < db)), da, db)     # the jaw is the NEARER surface
+        P = oak.points(near, blob)
+        if len(P) < 50:
+            return None, blob
+        P = P[P[:, 2] < np.percentile(P[:, 2], 50) + 0.03]
+        pts.append(np.median(P, 0))
+        masks.append(blob)
+    if np.linalg.norm(pts[0] - pts[1]) > 0.01:
+        return None, masks[0]
+    return (pts[0] + pts[1]) / 2, masks[0] | masks[1]
 
 
 def solve_calibration(cam_pts, grip_T):
-    """Camera->base transform AND the marker's offset on the gripper, from pairs of
-    (marker centre seen by the camera, gripper pose from the arm). Alternates Kabsch / least squares."""
+    """Camera->base transform AND where the seen point sits on the gripper, from pairs of
+    (point seen by the camera, gripper pose from the arm). Alternates Kabsch / least squares."""
     cam_pts = np.asarray(cam_pts)
     off = np.zeros(3)
     for _ in range(100):
@@ -101,6 +142,41 @@ def solve_calibration(cam_pts, grip_T):
     return T_bc, off, float(np.sqrt(np.mean(np.square(res)))), res
 
 
+def solve_with_floor(cam_pts, grip_T, n_cam, d_cam, table_z, iters=200):
+    """Like solve_calibration, but the floor fixes tilt, roll and height exactly: the floor normal
+    seen by the camera must become the arm's +z and the floor must sit at table_z. Only the turn
+    about z, the x/y position and the point on the gripper are left for the gripper sightings
+    (far fewer unknowns: simulated with 5 mm sighting noise, 4x smaller error)."""
+    cam_pts = np.asarray(cam_pts)
+    z = np.array([0.0, 0.0, 1.0])
+    v = np.cross(n_cam, z)
+    c = float(n_cam @ z)
+    vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    R0 = np.eye(3) + vx + vx @ vx / (1 + c)                 # turns the floor normal onto +z
+    tz = table_z + d_cam                                    # floor point -d*n lands at z = table_z
+    C = (R0 @ cam_pts.T).T
+    off = np.zeros(3)
+    for _ in range(iters):
+        B = np.array([T[:3, :3] @ off + T[:3, 3] for T in grip_T])
+        mc, mb = C[:, :2].mean(0), B[:, :2].mean(0)
+        H = (C[:, :2] - mc).T @ (B[:, :2] - mb)
+        yaw = np.arctan2(H[0, 1] - H[1, 0], H[0, 0] + H[1, 1])
+        Rz = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+        txy = mb - (Rz[:2, :2] @ mc)
+        R, t = Rz @ R0, np.r_[txy, tz]
+        A = np.vstack([T[:3, :3] for T in grip_T])
+        b = np.concatenate([R @ p + t - T[:3, 3] for p, T in zip(cam_pts, grip_T)])
+        new = np.linalg.lstsq(A, b, rcond=None)[0]
+        done = np.linalg.norm(new - off) < 1e-8
+        off = new
+        if done:
+            break
+    T_bc = np.eye(4)
+    T_bc[:3, :3], T_bc[:3, 3] = R, t
+    res = [np.linalg.norm(R @ p + t - (Tg[:3, :3] @ off + Tg[:3, 3])) for p, Tg in zip(cam_pts, grip_T)]
+    return T_bc, off, float(np.sqrt(np.mean(np.square(res)))), res
+
+
 def cmd_calibrate():
     from iro.motion import Arm
     from iro.oak import Oak
@@ -109,57 +185,97 @@ def cmd_calibrate():
     cfg = pick_config()
     oak = Oak()
     f = feed()
-    print("Tape the printed marker on the gripper side facing the OAK-D. The arm will move through "
-          "about 16 poses in front of the robot; keep the area clear.")
+    _, depth = oak.read(5)
+    fl = floor_plane(oak, depth)
+    if fl is None:
+        print("The OAK-D does not see enough floor. Clear the floor in front of the robot and try again.")
+        return 1
+    h, tilt, roll = mount_from_floor(fl[0], fl[1])
+    print(f"Floor: OAK-D is {h * 100:.1f} cm above it, tilted {tilt:.1f} deg down, roll {roll:+.1f} deg "
+          f"(floor flat to {fl[2] * 1000:.1f} mm)")
+    print("No marker needed: the arm moves through ~16 poses in front of the OAK-D and opens/closes the "
+          "gripper at each one, so the camera finds the gripper by itself. Keep the area clear and "
+          "nothing else moving in front of the robot.")
     input("Ready? Enter. ")
     cam_pts, grip_T = [], []
     with Arm() as arm:
         roll0 = arm.level_roll()
         table = cfg["table_z"]
-        poses = [(x, y, table + h, r) for h in (0.06, 0.14, 0.22) for x in (0.16, 0.24)
-                 for y in (-0.08, 0.0, 0.08) for r in (0.0,)]
-        poses += [(0.20, 0.0, table + 0.12, np.radians(r)) for r in (-40, 40)]   # some roll variety
+        # 30 poses: more sightings average out the jaw's few-mm noise (simulated: 16 -> 30 poses,
+        # 4.5 -> 3.7 mm median with the floor constraint)
+        poses = [(x, y, table + hh, 0.0) for hh in (0.06, 0.14, 0.22) for x in (0.15, 0.20, 0.25)
+                 for y in (-0.08, 0.0, 0.08)]
+        poses += [(0.20, 0.0, table + 0.12, np.radians(r)) for r in (-40, 40, -20)]   # roll variety
         for i, (x, y, z, dr) in enumerate(poses):
             try:
                 arm.move_tip([x, y, z], roll=roll0 + dr)
             except Exception as e:     # noqa: BLE001 - unreachable pose: skip it
                 print(f"  pose {i + 1}: skipped ({str(e)[:60]})")
                 continue
-            time.sleep(0.6)
-            img, _ = oak.read(2)
-            p, c = find_marker(img, oak)
+            time.sleep(0.5)
+            q = arm.joints()
+            p, m = find_jaw(arm, oak)
+            img, _ = oak.read(1)
             vis = img.copy()
-            if c is not None:
-                cv2.polylines(vis, [c.astype(int)], True, (0, 255, 0), 2)
-            f.show(vis, f"calibration pose {i + 1}/{len(poses)}: {'marker seen' if p is not None else 'marker NOT seen'}")
+            vis[m > 0] = (vis[m > 0] * 0.4 + np.array([0, 200, 0]) * 0.6).astype(np.uint8)
+            f.show(vis, f"calibration pose {i + 1}/{len(poses)}: {'gripper found' if p is not None else 'gripper NOT found'}")
             if p is None:
-                print(f"  pose {i + 1}: marker not seen")
+                print(f"  pose {i + 1}: gripper not found (out of view, or something else moved)")
                 continue
             cam_pts.append(p)
-            grip_T.append(arm.kin.fk(arm.joints(), "gripper_link"))
-            print(f"  pose {i + 1}: marker at {np.round(p * 100, 1)} cm")
+            grip_T.append(arm.kin.fk(q, "gripper_link"))
+            print(f"  pose {i + 1}: gripper at {np.round(p * 100, 1)} cm from the OAK-D")
+        arm.gripper(False)
         arm.move_tip([0.20, 0.0, table + 0.15])
     oak.close()
     if len(cam_pts) < 6:
-        print(f"Only {len(cam_pts)} poses saw the marker (need 6+). Turn the marker toward the OAK-D, check "
-              "the light, and run it again.")
+        print(f"Only {len(cam_pts)} poses found the gripper (need 6+). Check the OAK-D sees the area in front "
+              "of the arm (iro efad see), and that nothing else moved.")
         return 1
-    T, off, rms, res = solve_calibration(cam_pts, grip_T)
-    bad = [i for i, r in enumerate(res) if r > 3 * max(rms, 0.003)]
-    if bad and len(cam_pts) - len(bad) >= 6:       # one bad detection must not spoil it
+    T, off, rms, res = solve_with_floor(cam_pts, grip_T, fl[0], fl[1], table)
+    bad = [i for i, r in enumerate(res) if r > 3 * max(rms, 0.004)]
+    if bad and len(cam_pts) - len(bad) >= 6:       # one bad sighting must not spoil it
         keep = [i for i in range(len(cam_pts)) if i not in bad]
-        T, off, rms, res = solve_calibration([cam_pts[i] for i in keep], [grip_T[i] for i in keep])
+        T, off, rms, res = solve_with_floor([cam_pts[i] for i in keep], [grip_T[i] for i in keep], fl[0], fl[1], table)
+    free = solve_calibration(cam_pts, grip_T)[0]   # without the floor: must roughly agree
+    disagree = float(np.linalg.norm(free[:3, 3] - T[:3, 3]))
+    # independent check: the gripper sightings alone (no floor) must put the camera nearly there too
     print(f"\nOAK-D position in the arm frame: {np.round(T[:3, 3] * 100, 1)} cm; fit error {rms * 1000:.1f} mm "
-          f"({len(res)} poses); marker sits {np.round(off * 100, 1)} cm from the gripper joint")
-    if rms > 0.012:
-        print("Fit worse than 12 mm: not saved. Check the marker is flat and its printed size is exactly "
-              f"{MARKER_MM} mm, then run again.")
+          f"({len(res)} poses); the point found sits {np.round(off * 100, 1)} cm from the gripper joint")
+    print(f"Check: gripper sightings alone put the OAK-D {disagree * 100:.1f} cm from that (should be < 2.5 cm)")
+    if rms > 0.012 or disagree > 0.025:
+        print("Not saved: the fit or the floor check is off. Run again with nothing moving in view; if it "
+              "repeats, send me the output.")
         return 1
-    CALIB.write_text(yaml.safe_dump({"T_base_cam": T.round(6).tolist(), "marker_offset": off.round(5).tolist(),
+    CALIB.write_text(yaml.safe_dump({"T_base_cam": T.round(6).tolist(), "jaw_point": off.round(5).tolist(),
                                      "rms_m": round(rms, 5), "poses": len(res),
-                                     "date": time.strftime("%Y-%m-%d %H:%M")}))
+                                     "floor_cam": {"normal": fl[0].round(5).tolist(), "d": round(fl[1], 5)},
+                                     "check_without_floor_m": round(disagree, 4),
+                                     "date": time.strftime("%Y-%m-%d %H:%M"), "method": "markerless (jaw)"}))
     print(f"Saved {CALIB.relative_to(ROOT)}. Next: iro efad see")
     return 0
+
+
+def cmd_check(quiet=False):
+    """Has the OAK-D mount moved since calibration? Compares today's floor with the saved one."""
+    from iro.oak import Oak
+    if not CALIB.exists():
+        print("Not calibrated yet: iro efad calibrate")
+        return 1
+    saved = yaml.safe_load(CALIB.read_text()).get("floor_cam")
+    oak = Oak()
+    _, depth = oak.read(5)
+    oak.close()
+    fl = floor_plane(oak, depth)
+    if fl is None or saved is None:
+        print("Cannot check: not enough floor in view" if fl is None else "Calibration has no floor record: re-run iro efad calibrate")
+        return 1
+    h0, t0, r0 = mount_from_floor(np.array(saved["normal"]), saved["d"])
+    h, t, r = mount_from_floor(fl[0], fl[1])
+    moved = abs(h - h0) > 0.01 or abs(t - t0) > 1.5 or abs(r - r0) > 1.5
+    print(f"OAK-D now {h * 100:.1f} cm high, tilt {t:.1f} deg, roll {r:+.1f}  |  at calibration {h0 * 100:.1f} cm, "
+          f"{t0:.1f} deg, {r0:+.1f}  ->  {'MOVED: run iro efad calibrate' if moved else 'OK, unchanged'}")
+    return 2 if moved else 0
 
 
 # --- seeing ----------------------------------------------------------------------
@@ -270,7 +386,7 @@ def cmd_pick(name, dry_run=False, drop=False):
     from iro.stream import feed
     cfg = pick_config()
     if load_calib() is None:
-        print("EFAD is not calibrated yet: iro efad marker, then iro efad calibrate")
+        print("EFAD is not calibrated yet: iro efad calibrate (no marker needed)")
         return 1
     scene = Scene()
     f = feed()
@@ -352,8 +468,8 @@ def main():
     if a[0] == "show" and len(a) >= 2:
         from iro.instant import cmd_show
         return cmd_show(a[1], oak=True)
-    if a[0] == "marker":
-        return cmd_marker()
+    if a[0] == "check":
+        return cmd_check()
     if a[0] == "calibrate":
         return cmd_calibrate()
     if a[0] == "pick" and len(a) >= 2:

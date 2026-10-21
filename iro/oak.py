@@ -11,7 +11,25 @@ import numpy as np
 
 
 class Oak:
-    def __init__(self, ir=0.5, size=(640, 400)):
+    def __init__(self, ir=0.5, size=(640, 400), tries=3):
+        """Starts the OAK-D. Restarted within a few seconds of the last session it may still be
+        rebooting and drop the link (tested 21 Oct: 5/5 starts fine 8 s apart): so retry."""
+        for k in range(tries):
+            try:
+                self._open(ir, size)
+                self.read(1)                      # the link really works
+                return
+            except RuntimeError as e:
+                if k == tries - 1:
+                    raise
+                print(f"  OAK-D did not start ({str(e)[:60]}); retrying in 6 s")
+                try:
+                    self.p.stop()
+                except Exception:                 # noqa: BLE001 - already gone
+                    pass
+                time.sleep(6)
+
+    def _open(self, ir, size):
         import depthai as dai
         self.dai, self.size = dai, size
         self.p = dai.Pipeline()
@@ -61,6 +79,8 @@ class Oak:
         """3D points (camera frame, metres) of the valid depth pixels inside mask."""
         v, u = np.nonzero(mask & (depth > 0))
         z = depth[v, u] / 1000.0
+        # pictures arrive already undistorted (tested 21 Oct: the floor is flat to 1.3 mm this way,
+        # 2.7 mm if undistorted again, and the height matches the tape measure)
         fx, fy, cx, cy = self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2]
         return np.c_[(u - cx) * z / fx, (v - cy) * z / fy, z]
 
