@@ -66,9 +66,18 @@ class Arm:
         self.bus = self._cm.__enter__()
         if not self.dry_run:
             # Goal = present position BEFORE torque on, so nothing jumps
-            now = self.bus.sync_read("Present_Position", normalize=False)
-            self.bus.sync_write("Goal_Position", now, normalize=False)
-            self.bus.enable_torque()
+            now = self.bus.sync_read("Present_Position", normalize=False, num_retry=3)
+            self.bus.sync_write("Goal_Position", now, normalize=False, num_retry=3)
+            # one motor at a time, retried: all six at once is a current surge, and a single garbled
+            # reply from shoulder_lift once aborted `iro track` (21 Oct 21:24)
+            for name in self.bus.motors:
+                try:
+                    self.bus.enable_torque(name, num_retry=3)
+                except ConnectionError as e:
+                    self._cm.__exit__(None, None, None)
+                    raise MotionError(f"{name} does not answer when switched on ({e}). Check its cable and "
+                                      "the 12 V supply, then: iro doctor") from e
+                time.sleep(0.02)
         return self
 
     def limp(self):
