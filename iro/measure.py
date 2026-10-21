@@ -3,8 +3,8 @@
     iro measure                every object on the floor in front of the robot: L x W x H (OAK-D)
     iro measure NAME           measure one object and save it to objects/NAME/size.yaml
                                (--looks N: turn it between looks; the median is kept)
-    iro measure gripper        the jaws' real opening (mm) at each gripper %, seen by the OAK-D:
-                               saves config/gripper.yaml (max opening, % for any width)
+    iro measure gripper        the jaws' real opening (mm) at each gripper %, from the arm's own 3D
+                               model + servo calibration: saves config/gripper.yaml
     iro measure feel [NAME]    the gripper closes on what is between its jaws and reads the width
                                from the servo (a second, independent measurement)
 
@@ -224,110 +224,110 @@ def set_gripper(arm, pct, wait=0.8):
     time.sleep(wait)
 
 
-def jaw_gap_px(mask, tip_y):
-    """Inner gap between the two jaws just above their tips (median over a band of rows), in
-    pixels, plus the rows used; None if the jaws do not show as two prongs."""
-    gaps = []
-    for y in range(max(0, tip_y - 22), max(0, tip_y - 6)):
-        row = mask[y] > 0
-        edges = np.flatnonzero(np.diff(np.r_[0, row.astype(np.int8), 0]))
-        runs = [(edges[i], edges[i + 1]) for i in range(0, len(edges), 2)]
-        runs = [rr for rr in runs if rr[1] - rr[0] >= 3]
-        if len(runs) >= 2:
-            runs.sort(key=lambda rr: rr[0])
-            # the two widest runs are the jaws
-            a, b = sorted(sorted(runs, key=lambda rr: rr[0] - rr[1])[:2], key=lambda rr: rr[0])
-            gaps.append(b[0] - a[1])
-        elif len(runs) == 1:
-            gaps.append(0)
-    return (float(np.median(gaps)), len(gaps)) if gaps else (None, 0)
+def _stl(path):
+    """Vertices of an STL file (binary or text)."""
+    import struct
+    b = open(path, "rb").read()
+    if b[:5] == b"solid" and b"facet" in b[:300]:
+        return np.array([list(map(float, ln.split()[1:4])) for ln in b.decode(errors="ignore").splitlines()
+                         if ln.strip().startswith("vertex")])
+    n = struct.unpack("<I", b[80:84])[0]
+    a = np.frombuffer(b[84:84 + n * 50], dtype=np.dtype([("n", "<3f4"), ("v", "<9f4"), ("a", "<u2")]))
+    return a["v"].reshape(-1, 3).astype(float)
+
+
+def jaw_model():
+    """(fixed-jaw vertices, function hinge angle -> moving-jaw vertices), in the gripper_link frame,
+    from the SO-101 URDF and its meshes (the same model RViz shows)."""
+    import xml.etree.ElementTree as ET
+    from iro.kinematics import URDF, _rpy, _tf
+    root = ET.parse(URDF).getroot()
+    assets = URDF.parent / "assets"
+
+    def origin(el):
+        o = el.find("origin")
+        xyz = [float(v) for v in o.get("xyz", "0 0 0").split()]
+        rpy = [float(v) for v in o.get("rpy", "0 0 0").split()]
+        return _tf(_rpy(*rpy), xyz)
+
+    def mesh(link, name):
+        for vis in root.find(f"link[@name='{link}']").findall("visual"):
+            m = vis.find("geometry/mesh")
+            if m is not None and name in m.get("filename"):
+                T = origin(vis)
+                return _stl(assets / m.get("filename").split("/")[-1]) @ T[:3, :3].T + T[:3, 3]
+        raise FileNotFoundError(name)
+
+    fixed = mesh("gripper_link", "wrist_roll_follower")          # this part carries the fixed jaw
+    jaw = mesh("moving_jaw_so101_v1_link", "moving_jaw")
+    hinge = origin(root.find("joint[@name='gripper']"))
+
+    def moving(theta):
+        c, s_ = np.cos(theta), np.sin(theta)
+        R = np.array([[c, -s_, 0], [s_, c, 0], [0, 0, 1]])
+        return jaw @ (hinge[:3, :3] @ R).T + hinge[:3, 3]
+    return fixed, moving
+
+
+def fingertip_gap(fixed, jaw, tip_len=0.015):
+    """Smallest distance between the jaws over the last `tip_len` of the SHORTER jaw (where an
+    object is held), and how far the moving jaw's tip falls short of the fixed one (m)."""
+    out_f, out_m = -fixed[:, 2], -jaw[:, 2]                      # distance out along the gripper
+    start = min(out_f.max(), out_m.max()) - tip_len
+    a, b = fixed[out_f > start], jaw[out_m > start]
+    a, b = a[::max(1, len(a) // 2500)], b[::max(1, len(b) // 2500)]
+    d = np.sqrt(((a[:, None, :] - b[None, :, :]) ** 2).sum(-1)).min()
+    return float(d), float(out_f.max() - out_m.max())
+
+
+def gripper_curve(arm_cal):
+    """Opening at every gripper %, from the jaw model and the servo calibration."""
+    fixed, moving = jaw_model()
+    c = arm_cal["gripper"]
+    rows = []
+    for pct in range(0, 101, 2):
+        raw = c["range_min"] + pct / 100 * (c["range_max"] - c["range_min"])
+        theta = (raw - 2048) * 2 * np.pi / 4096                 # same mapping as iro.motion (gripper offset 0)
+        gap, short = fingertip_gap(fixed, moving(theta))
+        rows.append((pct, np.degrees(theta), gap * 1000, short * 1000))
+    return rows
 
 
 def cmd_gripper():
-    """Opening curve of the gripper, measured by the OAK-D: % -> mm, max opening."""
-    from iro.efad import arm_mask, jaw_direction, load_calib, park_and_shoot
-    from iro.motion import Arm
-    from iro.oak import Oak
-    from iro.pick import pick_config
+    """The jaws' real opening at every gripper %, from the arm's own 3D model + servo calibration.
+    21 Oct: the model's jaws touch at -11 deg, the calibrated fully-closed servo position is
+    -12.5 deg: they agree. (Measuring the gap in the OAK-D picture was tried first: the moving jaw
+    swings on a hinge, out of view when wide open, so the picture could not show the gap.)"""
+    import json
     from iro.record import run
-    from iro.stream import feed
-    T = load_calib()
-    if T is None:
-        print("Calibrate the OAK-D first: iro efad calibrate")
-        return 1
-    cfg = pick_config()
     r = run("measure-gripper")
-    f = feed()
-    oak = Oak()
-    K = oak.K
-    print("The gripper opens step by step in front of the OAK-D, which measures the gap. Keep clear.")
-    table = cfg["table_z"]
-    where = np.array([0.30, 0.0, table + 0.06])        # in view, upright (efad calibration grid)
-    steps = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    rows = []
-    try:
-        with Arm() as arm:
-            level = arm.level_roll()
-            # wrist roll that opens the jaws ACROSS the OAK-D's view (not toward it)
-            view = T[:3, 3] - where
-            view /= np.linalg.norm(view)
-            best = None
-            for dr in np.radians(np.arange(-90, 91, 15)):
-                roll = level + dr
-                if not (arm.kin.limits[4][0] <= roll <= arm.kin.limits[4][1]):
-                    continue
-                q, err = arm.kin.ik_down(where, np.r_[arm.joints()[:4], roll])
-                if err > 0.004:
-                    continue
-                score = abs(np.dot(jaw_direction(arm.kin, q), view))      # 0 = across the view
-                if best is None or score < best[0]:
-                    best = (score, roll)
-            roll = best[1] if best else level
-            bg = park_and_shoot(arm, oak, roll)
-            r.snap("empty_floor", bg)
-            arm.move_tip(list(where), roll=roll)
-            time.sleep(0.5)
-            q = arm.joints()
-            tipT = arm.kin.fk(q)
-            tip_cam = T[:3, :3].T @ (tipT[:3, 3] - T[:3, 3])
-            axis_cam = T[:3, :3].T @ jaw_direction(arm.kin, q)
-            shrink = float(np.hypot(axis_cam[0], axis_cam[1]))          # how much of the opening faces the camera
-            mm_per_px = tip_cam[2] / K[0, 0] * 1000 / max(shrink, 0.3)
-            r.note(f"tip {tip_cam[2] * 100:.1f} cm from the OAK-D, opening faces it {shrink:.0%}, {mm_per_px:.2f} mm/px")
-            for pct in steps:
-                set_gripper(arm, pct)
-                img, _ = oak.read(3)
-                m = arm_mask(img, bg)
-                ys = np.nonzero(m)[0]
-                if len(ys) < 300:
-                    print(f"  {pct:3d}%: arm not seen")
-                    continue
-                gap, used = jaw_gap_px(m, int(ys.max()))
-                vis = img.copy()
-                vis[m > 0] = (vis[m > 0] * 0.5 + np.array([0, 200, 0]) * 0.5).astype(np.uint8)
-                txt = f"{pct}%: gap {gap * mm_per_px:.1f} mm" if gap is not None else f"{pct}%: jaws not separated"
-                cv2.putText(vis, txt, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                r.video("gripper", vis)
-                r.snap(f"open{pct:03d}", vis)
-                f.show(vis, txt)
-                if gap is not None:
-                    rows.append((pct, gap * mm_per_px))
-                    r.log("opening", pct=pct, gap_px=gap, gap_mm=gap * mm_per_px, rows=used)
-                print("  " + txt)
-            set_gripper(arm, 0)
-            arm.move_tip([0.20, 0.0, table + 0.15])
-    finally:
-        oak.close()
-    if len(rows) < 5:
-        print(f"Too few readings. Recording: {r.dir} (iro review)")
-        return 1
-    pct, mm = np.array(rows).T
-    mm = np.maximum.accumulate(mm)                         # opening only grows with %
-    GRIPPER.write_text(yaml.safe_dump({"pct": pct.round(1).tolist(), "opening_mm": mm.round(1).tolist(),
-                                       "max_open_mm": round(float(mm.max()), 1),
-                                       "measured_at_cm": round(float(tip_cam[2] * 100), 1),
-                                       "recording": str(r.dir), "date": time.strftime("%Y-%m-%d %H:%M")}))
-    print(f"Max opening {mm.max():.0f} mm. Saved {GRIPPER.relative_to(ROOT)} (opening at every %).")
+    cal = json.load(open(ROOT / "arm" / "calibration" / "robots" / "so_follower" / "iro_follower.json"))
+    rows = gripper_curve(cal)
+    usable = [row for row in rows if row[3] < 0.020 * 1000]      # fingertips still within 2 cm of each other
+    closed = min(rows, key=lambda row: row[2])
+    max_row = max(usable, key=lambda row: row[2])
+    for pct, th, gap, short in rows[::5]:
+        print(f"  {pct:3d}%  hinge {th:6.1f} deg  opening {gap:5.1f} mm" + ("" if short < 20 else "  (jaw swung away: not usable)"))
+    print(f"Closed at {closed[0]}% ({closed[2]:.1f} mm). Widest usable opening {max_row[2]:.0f} mm at {max_row[0]}%.")
+    # chart for the recording
+    img = np.full((300, 520, 3), 255, np.uint8)
+    for x in range(0, 101, 10):
+        cv2.line(img, (40 + x * 4, 20), (40 + x * 4, 270), (230, 230, 230), 1)
+        cv2.putText(img, str(x), (32 + x * 4, 288), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (80, 80, 80), 1)
+    pts = np.array([[40 + row[0] * 4, 270 - row[2] * 2.5] for row in rows], np.int32)
+    cv2.polylines(img, [pts], False, (200, 100, 0), 2)
+    cv2.putText(img, f"jaw opening (mm) vs gripper %, widest usable {max_row[2]:.0f} mm", (40, 14),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+    r.snap("opening_curve", img)
+    for pct, th, gap, short in rows:
+        r.log("opening", pct=pct, hinge_deg=th, opening_mm=gap, tip_mismatch_mm=short)
+    keep = [row for row in rows if row[0] <= max_row[0]]
+    GRIPPER.write_text(yaml.safe_dump({
+        "pct": [row[0] for row in keep], "opening_mm": [round(row[2], 1) for row in keep],
+        "max_open_mm": round(max_row[2], 1), "max_open_pct": max_row[0],
+        "method": "SO-101 URDF jaw meshes + servo calibration (closed at -12.5 deg; model -11 deg)",
+        "date": time.strftime("%Y-%m-%d %H:%M")}))
+    print(f"Saved {GRIPPER.relative_to(ROOT)}. Check it on a real object: iro measure feel")
     return 0
 
 
@@ -337,6 +337,13 @@ def opening_mm(pct):
         return None
     g = yaml.safe_load(GRIPPER.read_text())
     return float(np.interp(pct, g["pct"], g["opening_mm"]))
+
+
+def max_open_m(default=0.07):
+    """Widest object (m) the jaws close around with both fingertips (iro measure gripper)."""
+    if not GRIPPER.exists():
+        return default
+    return yaml.safe_load(GRIPPER.read_text())["max_open_mm"] / 1000
 
 
 def pct_for(mm):

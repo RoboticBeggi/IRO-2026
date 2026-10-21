@@ -526,7 +526,8 @@ def cmd_pick(name, dry_run=False, drop=False):
         length = float(np.median([o["length"] for o in seen]))
         print(f"1. {name} at x {c[0] * 100:.1f}, y {c[1] * 100:+.1f} cm, top {c[2] * 100:+.1f} cm; "
               f"{length * 100:.1f} x {width * 100:.1f} cm, long axis {np.degrees(yaw):.0f} deg")
-        if width > cfg.get("gripper_max_open_m", 0.07):
+        from iro.measure import max_open_m
+        if width > max_open_m(cfg.get("gripper_max_open_m", 0.07)):
             print(f"   too wide for the gripper ({width * 100:.1f} cm across its narrow side)")
             return 1
         # 2. grasp plan: top-down, jaws across the narrow side, grip in the upper part
