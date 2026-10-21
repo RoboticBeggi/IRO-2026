@@ -101,6 +101,18 @@ def arm_mask(img, bg):
     return cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8))
 
 
+def park_and_shoot(arm, oak, roll):
+    """Arm parked up out of the OAK-D's view (gripper closed): the empty-floor picture that the
+    arm is later found against (arm_mask)."""
+    arm.gripper(False)
+    park = np.radians([0.0, -40.0, 40.0, 20.0, 0.0])      # tip ~30 cm above the floor
+    park[4] = roll
+    arm.move_joints_repeatable(park)
+    time.sleep(0.5)
+    pic, _ = oak.read(3)
+    return pic
+
+
 def find_tip(oak, bg):
     """Pixel of the closed gripper's tip: the LOWEST point of the arm in the picture (the arm
     always comes into the OAK-D's view from the top). Returns (pixel or None, picture, info).
@@ -264,14 +276,7 @@ def cmd_calibrate(test=False):
         poses = calibration_poses(table)
 
         def empty_floor():
-            """Arm parked up out of the OAK-D's view: the picture to compare against."""
-            arm.gripper(False)
-            park = np.radians([0.0, -40.0, 40.0, 20.0, 0.0])      # tip ~30 cm above the floor
-            park[4] = roll0
-            arm.move_joints_repeatable(park)
-            time.sleep(0.5)
-            pic, _ = oak.read(3)
-            return pic
+            return park_and_shoot(arm, oak, roll0)
         bg = empty_floor()
         r.snap("empty_floor", bg)
         if test:
