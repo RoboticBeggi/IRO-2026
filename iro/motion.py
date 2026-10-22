@@ -124,7 +124,12 @@ class Arm:
         def bad():
             st = self.bus.sync_read("Status", normalize=False)
             temp = self.bus.sync_read("Present_Temperature", normalize=False)
+            volts = self.bus.sync_read("Present_Voltage", normalize=False)
             out = {}
+            low = min(volts.values()) / 10
+            if low < self.lim.get("volt_fail", 10.0):        # 22 Oct: supply sagged 11.4 -> 7.2 -> 5.8 V
+                out["power"] = (f"servo supply at {low:.1f} V (needs ~12 V): charge/replace the arm's battery or "
+                                "power supply, then `iro doctor`")
             for j in st:
                 if st[j]:
                     out[j] = f"{j} servo reports {', '.join(decode_status(st[j]))}"

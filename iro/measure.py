@@ -471,6 +471,9 @@ RIGID_MM_PER_LOAD = 0.22   # how far the jaws still give per % of load on a HARD
                            # 21 Oct: 0.21-0.25): the gripper's own flex. Much more = a soft object.
 
 
+HOLD_PCT = 4               # carrying: aim this % past first contact (~6 mm into the gripper's own flex)
+
+
 def find_contact(cmd, jaw, load, skip=4, base_min=4, final=False):
     """Index of first contact while closing, or None (also None while it cannot be sure yet).
     - the first `skip` readings are the jaw speeding up (lag 0 -> 1.5 %, load 2 -> 8 %): ignored
@@ -497,8 +500,8 @@ def find_contact(cmd, jaw, load, skip=4, base_min=4, final=False):
 
 def close_on(arm, start, r, step=2, hold=False):
     """Close from `start` % until FIRST CONTACT (find_contact). Returns None if nothing was gripped
-    (the jaws end closed), else {touch_pct, width_mm, give_mm, softness, feel}. hold=True keeps the
-    light squeeze (for carrying); else the jaws are left where they stopped."""
+    (the jaws end closed), else {touch_pct, width_mm, give_mm, softness, feel}. hold=True: a gentle
+    carrying grip (HOLD_PCT past contact); else the jaws are left where they stopped."""
     c = arm.cal["gripper"]
     cmd, jaw, load = [], [], []
     hit = None
@@ -525,8 +528,10 @@ def close_on(arm, start, r, step=2, hold=False):
     soft = per_load / RIGID_MM_PER_LOAD
     feel = "hard" if soft < 1.6 else ("a bit soft" if soft < 4 else "soft (squashes)")
     r.note(f"contact {touch:.2f}% -> {width:.1f} mm; give {give:.1f} mm, {per_load:.3f} mm/% load, softness x{soft:.1f}")
-    if not hold:
-        arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, jaw[-1]), normalize=False)
+    # never leave the jaw commanded far past the object: the servo pushes at full force and trips
+    # its overload protection (22 Oct: the first real pick stopped lifting with "overloaded")
+    arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, max(0.0, touch - HOLD_PCT) if hold else jaw[-1]),
+                  normalize=False)
     return {"touch_pct": touch, "width_mm": width, "give_mm": give, "softness": soft, "feel": feel,
             "held_pct": jaw[-1]}
 
