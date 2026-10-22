@@ -2,11 +2,11 @@
 
     iro measure                every object on the floor in front of the robot: L x W x H (OAK-D)
     iro measure NAME           measure one object and save it to objects/NAME/size.yaml
-                               (--looks N: turn it between looks; the median is kept)
+                               (--looks N: turn it between looks; sizes are combined per side)
     iro measure gripper        the jaws' real opening (mm) at each gripper %, from the arm's own 3D
                                model + servo calibration: saves config/gripper.yaml
-    iro measure feel [NAME]    the gripper closes on what is between its jaws and reads the width
-                               from the servo (a second, independent measurement)
+    iro measure feel [NAME]    the gripper as a caliper: width at FIRST CONTACT, and how soft it is
+                               (a second, independent measurement; saved with NAME)
 
 Floor objects (the depth-camera "box measurement" method): the floor plane is fitted, everything
 standing higher than 6 mm above it is mapped onto a top-down grid (5 mm cells), each separate blob
@@ -93,14 +93,28 @@ def floor_objects(oak, depth, fl, min_cells=12):
         # edge "flying pixels" sit low between object and floor: footprint from the upper part
         top = sel & (h > max(MIN_H, 0.3 * height))
         pts = uv[top] if top.sum() > 30 else uv[sel]
+        # trim stray points (1% each side along the blob's own axes) before the tight rectangle
+        mu = pts.mean(0)
+        ev = np.linalg.eigh(np.cov((pts - mu).T))[1]
+        pr = (pts - mu) @ ev
+        lo_, hi_ = np.percentile(pr, 1, 0), np.percentile(pr, 99, 0)
+        pts = pts[np.all((pr >= lo_) & (pr <= hi_), 1)]
         (cx, cy), (a, b), ang = cv2.minAreaRect(pts.astype(np.float32))
         length, width = max(a, b), min(a, b)
         yaw = np.radians(ang if a >= b else ang + 90)
+        # which footprint side runs along the camera's line of sight: its far end is hidden behind
+        # the object, so that size is only a LOWER BOUND (single-view dimensioning limit)
+        view = np.array([u[2], v[2]])
+        view /= np.linalg.norm(view) or 1
+        side_a = np.array([np.cos(np.radians(ang)), np.sin(np.radians(ang))])
+        a_along = abs(side_a @ view) > np.sqrt(0.5)
+        hidden = "length" if (a_along == (a >= b)) else "width"
         centre = cx * u + cy * v - d * n                       # on the floor, camera coordinates
         Pc = P[sel]
         px = np.c_[K[0, 0] * Pc[:, 0] / Pc[:, 2] + K[0, 2], K[1, 1] * Pc[:, 1] / Pc[:, 2] + K[1, 2]]
         corners = cv2.boxPoints(((cx, cy), (a, b), ang))
         out.append({"length": float(length), "width": float(width), "height": height, "yaw_floor": float(yaw),
+                    "hidden": hidden,
                     "centre_cam": centre, "box": [*np.percentile(px, 1, 0), *np.percentile(px, 99, 0)],
                     "corners_uv": corners, "points": int(sel.sum()), "uvh": (u, v, n, d)})
     return sorted(out, key=lambda o: -o["length"] * o["width"])
@@ -120,6 +134,25 @@ def draw_objects(img, objs, K):
     return vis
 
 
+def zone_overlay(img, K, fl):
+    """Tint the floor where objects can be measured (NEAR..FAR from the OAK-D)."""
+    h, w = img.shape[:2]
+    xs, ys = np.meshgrid((np.arange(w) - K[0, 2]) / K[0, 0], (np.arange(h) - K[1, 2]) / K[1, 1])
+    rays = np.dstack([xs, ys, np.ones_like(xs)])
+    den = rays @ fl[0]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = -fl[1] / den
+    rng = t * np.linalg.norm(rays, axis=2)
+    zone = (den < 0) & (rng > NEAR) & (rng < FAR)
+    out = img.copy()
+    out[zone] = (out[zone] * 0.75 + np.array([255, 120, 0]) * 0.25).astype(np.uint8)
+    edge = cv2.morphologyEx(zone.astype(np.uint8), cv2.MORPH_GRADIENT, np.ones((3, 3), np.uint8)) > 0
+    out[edge] = (255, 120, 0)
+    cv2.putText(out, f"measuring zone {NEAR * 100:.0f}-{FAR * 100:.0f} cm", (8, h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 160, 60), 1)
+    return out
+
+
 def look(oak, fl, n=3):
     """Several depth pictures; each object's sizes are the median over them."""
     shots = []
@@ -127,6 +160,7 @@ def look(oak, fl, n=3):
         img, depth = oak.read(5)
         shots.append(floor_objects(oak, depth, fl))
     base = shots[-1]
+    look.raw = (img, depth)                       # last raw picture, for the recording
     for o in base:
         same = [min(s, key=lambda q: np.linalg.norm(q["centre_cam"] - o["centre_cam"])) for s in shots if s]
         same = [q for q in same if np.linalg.norm(q["centre_cam"] - o["centre_cam"]) < 0.03]
@@ -155,14 +189,20 @@ def cmd_objects(name=None, looks=1):
         results = []
         for k in range(looks):
             if looks > 1:
-                input(f"Look {k + 1}/{looks}: put/turn it on the floor 25-60 cm in front of the OAK-D, Enter. ")
+                live, _ = oak.read(1)
+                f.show(zone_overlay(live, oak.K, fl), "put it inside the blue zone")
+                input(f"Look {k + 1}/{looks}: put/turn it inside the BLUE zone on the live page "
+                      "(turn it so a different side faces the camera each time), Enter. ")
             img, objs = look(oak, fl)
-            vis = draw_objects(img, objs, oak.K)
+            vis = draw_objects(zone_overlay(img, oak.K, fl), objs, oak.K)
+            raw_img, raw_depth = look.raw            # raw data: any later method can re-measure this look
+            np.savez_compressed(r.dir / f"look{k + 1}_raw.npz", image=raw_img, depth=raw_depth, K=oak.K,
+                                floor_n=fl[0], floor_d=fl[1])
             r.snap(f"look{k + 1}", vis)
             r.video("measure", vis)
             f.show(vis, f"{len(objs)} object(s) measured")
             if not objs:
-                print("  nothing standing on the floor in the measured area (25-60 cm in front of the OAK-D)")
+                print("  nothing standing on the floor inside the blue zone on the live page (25-60 cm from the OAK-D)")
                 r.note("nothing found")
                 continue
             for i, o in enumerate(objs):
@@ -170,8 +210,11 @@ def cmd_objects(name=None, looks=1):
                 if T is not None:
                     c = T[:3, :3] @ o["centre_cam"] + T[:3, 3]
                     where = f"  at ({c[0] * 100:.0f}, {c[1] * 100:+.0f}) cm from the arm"
-                line = (f"  {i + 1}: {o['length'] * 100:.1f} x {o['width'] * 100:.1f} x {o['height'] * 100:.1f} cm "
-                        f"(L x W x H, looks agree within {o['spread_mm']:.0f} mm){where}")
+                hl = "at least " if o["hidden"] == "length" else ""
+                hw = "at least " if o["hidden"] == "width" else ""
+                line = (f"  {i + 1}: {hl}{o['length'] * 100:.1f} x {hw}{o['width'] * 100:.1f} x {o['height'] * 100:.1f} cm "
+                        f"(L x W x H; 'at least' = its back is hidden from the camera; frames agree within "
+                        f"{o['spread_mm']:.0f} mm){where}")
                 print(line)
                 r.note(line)
                 r.log("objects", look=k + 1, index=i + 1, length_m=o["length"], width_m=o["width"],
@@ -186,16 +229,34 @@ def cmd_objects(name=None, looks=1):
                         c = np.array([(b[0] + b[2]) / 2, (b[1] + b[3]) / 2])
                         pick = min(objs, key=lambda o: np.linalg.norm(c - np.array([(o["box"][0] + o["box"][2]) / 2,
                                                                                     (o["box"][1] + o["box"][3]) / 2])))
-                results.append([pick["length"], pick["width"], pick["height"]])
+                results.append(sorted([(pick["length"], pick["hidden"] == "length"),
+                                       (pick["width"], pick["hidden"] == "width"),
+                                       (pick["height"], False)], reverse=True))
         if name and results:
-            L, W, H = np.median(np.array(results), 0)
+            # each look: its three sizes, largest first, each flagged if only a lower bound. The
+            # object's sizes = the largest seen at each rank over the looks (hiding only ever
+            # makes a side look smaller; stray points are trimmed); "at least" if never seen whole
+            final = []
+            for k in range(3):
+                best = max((res[k] for res in results), key=lambda t: t[0])
+                seen = any(not res[k][1] and res[k][0] >= 0.9 * best[0] for res in results)
+                final.append((best[0], not seen))
+            L, W, H = (f[0] for f in final)
+            low = [n_ for n_, f in zip(("largest", "middle", "smallest"), final) if f[1]]
+            if low:
+                print(f"  Note: the {', '.join(low)} side was only seen end-on (its back hidden): it is AT LEAST "
+                      "that. Turn the object so that side faces the camera, and measure again.")
             from iro.objects import OBJ_DIR
             out = OBJ_DIR / name / "size.yaml"
             out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(yaml.safe_dump({"length_m": round(float(L), 4), "width_m": round(float(W), 4),
-                                           "height_m": round(float(H), 4), "looks": len(results),
-                                           "method": "OAK-D floor dimensioning", "recording": str(r.dir),
-                                           "date": time.strftime("%Y-%m-%d %H:%M")}))
+            old = yaml.safe_load(out.read_text()) if out.exists() else {}
+            old.update({"length_m": round(float(L), 4), "width_m": round(float(W), 4),
+                        "height_m": round(float(H), 4), "looks": len(results),
+                        "sizes_are": "largest, middle, smallest side (not tied to how it lies)",
+                        "at_least": [n_ for n_, f in zip(("length_m", "width_m", "height_m"), final) if f[1]],
+                        "method": "OAK-D floor dimensioning", "recording": str(r.dir),
+                        "date": time.strftime("%Y-%m-%d %H:%M")})
+            out.write_text(yaml.safe_dump(old))
             print(f"Saved {name}: {L * 100:.1f} x {W * 100:.1f} x {H * 100:.1f} cm -> {out.relative_to(ROOT)}")
     finally:
         oak.close()
@@ -354,37 +415,87 @@ def pct_for(mm):
     return float(np.interp(mm, g["opening_mm"], g["pct"]))
 
 
+RIGID_MM_PER_LOAD = 0.22   # how far the jaws still give per % of load on a HARD object (the tape,
+                           # 21 Oct: 0.21-0.25): the gripper's own flex. Much more = a soft object.
+
+
+def find_contact(cmd, jaw, load, base_n=8):
+    """Index of first contact while closing: the jaw starts trailing the command, or the load rises,
+    for 2 readings in a row (one spike does not count). Before that the jaw trails by a steady
+    ~1.5% and the load sits at ~8% (21 Oct)."""
+    lag = np.asarray(jaw) - np.asarray(cmd)
+    n = min(base_n, max(1, len(lag) - 2))
+    lag0 = float(np.median(lag[:n])) if len(lag) >= 4 else 1.5
+    load0 = float(np.median(load[:n])) if len(load) >= 4 else 8.0
+    for i in range(1, len(lag) - 1):
+        if (lag[i] > lag0 + 0.5 and lag[i + 1] > lag0 + 0.5) or (load[i] > load0 + 5 and load[i + 1] > load0 + 5):
+            return i
+    return None
+
+
 def cmd_feel(name=None):
-    """Close gently on what is between the jaws; the width is where the jaw stops."""
+    """The gripper as a caliper: close slowly, note the jaw position at FIRST CONTACT (the width),
+    squeeze a little more to feel how soft it is, let go. 21 Oct: the first version reported where
+    the jaw finally stopped, after squeezing 7 mm into a hard tape (20 mm instead of 26.5)."""
     from iro.motion import Arm
     from iro.record import run
     if not GRIPPER.exists():
         print("Measure the gripper first: iro measure gripper")
         return 1
+    g = yaml.safe_load(GRIPPER.read_text())
+    start = min(100, g["max_open_pct"] + 6)                # widest opening with the fingertips in line
     r = run(f"measure-feel-{name}" if name else "measure-feel")
+    c_ = None
     with Arm() as arm:
-        input("Hold the object between the open jaws (jaws open now), then Enter. ")
-        set_gripper(arm, 100)
-        input("Ready: Enter to close gently. ")
+        set_gripper(arm, start)
+        input(f"Hold the object between the jaws (open {opening_mm(start):.0f} mm now), then Enter to close gently. ")
         c = arm.cal["gripper"]
-        last, stop_pct = None, None
-        for pct in np.arange(100, -1, -2):                 # step closed; stop where the jaw stops
+        cmd, jaw, load = [], [], []
+        after = 0
+        for pct in np.arange(start, -1, -2):
             arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, pct), normalize=False)
             time.sleep(0.08)
             pos = arm.bus.read("Present_Position", "gripper", normalize=False)
-            load = abs(arm.bus.read("Present_Load", "gripper", normalize=False)) / 10
-            now = 100 * (pos - c["range_min"]) / (c["range_max"] - c["range_min"])
-            r.log("feel", command_pct=pct, jaw_pct=now, load_pct=load)
-            if now - pct > 6 or load > 35:                 # commanded past where it is: touching
-                stop_pct = now
-                break
-            last = now
-        stop_pct = stop_pct if stop_pct is not None else (last or 0)
-        w = opening_mm(stop_pct)
-        set_gripper(arm, stop_pct + 8)                     # let go of the squeeze
-    print(f"The jaws stopped at {stop_pct:.0f}%: the object is {w:.0f} mm wide there "
-          "(soft things like sponges read a little narrower: they squash)")
-    r.note(f"jaw stopped at {stop_pct:.1f}% -> {w:.1f} mm")
+            ld = abs(arm.bus.read("Present_Load", "gripper", normalize=False)) / 10
+            cmd.append(float(pct))
+            jaw.append(100 * (pos - c["range_min"]) / (c["range_max"] - c["range_min"]))
+            load.append(ld)
+            r.log("feel", command_pct=pct, jaw_pct=jaw[-1], load_pct=ld)
+            c_ = find_contact(cmd, jaw, load) if c_ is None else c_
+            if c_ is not None:
+                after += 1
+                if after >= 4 or ld > 35:                  # felt the squeeze: enough
+                    break
+        if c_ is None:
+            set_gripper(arm, start)
+            print("The jaws closed all the way without touching anything.")
+            r.note("no contact")
+            return 1
+        touch = jaw[c_ - 1]                                # last reading before the jaw was held back
+        set_gripper(arm, touch + 6)                        # let go of the squeeze
+    width = opening_mm(touch)
+    give = width - opening_mm(jaw[-1])
+    per_load = give / max(load[-1] - load[c_ - 1], 1)
+    soft = per_load / RIGID_MM_PER_LOAD
+    feel = "hard" if soft < 1.6 else ("a bit soft" if soft < 4 else "soft (squashes)")
+    print(f"First contact at {touch:.1f}%: the object is {width:.1f} mm wide between the fingertips. "
+          f"It gave {give:.1f} mm when squeezed ({per_load:.2f} mm per % load, {soft:.1f}x the gripper's own flex): {feel}.")
+    r.note(f"contact {touch:.2f}% -> {width:.1f} mm; give {give:.1f} mm, {per_load:.3f} mm/% load, softness x{soft:.1f}")
+    if name:
+        from iro.objects import OBJ_DIR
+        f = OBJ_DIR / name / "size.yaml"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        size = yaml.safe_load(f.read_text()) if f.exists() else {}
+        grips = size.get("grip_widths_m", []) + [round(width / 1000, 4)]
+        size.update({"grip_widths_m": grips[-10:], "grip_width_m": round(float(np.median(grips[-10:])), 4),
+                     "softness": round(soft, 2), "feel": feel})
+        f.write_text(yaml.safe_dump(size))
+        dims = [size[k] for k in ("length_m", "width_m", "height_m") if k in size]
+        if dims:
+            near = min(dims, key=lambda d: abs(d - width / 1000))
+            print(f"  The OAK-D measured {near * 1000:.0f} mm for the closest side: "
+                  f"{'they agree' if abs(near * 1000 - width) < 5 else 'they DISAGREE'} ({abs(near * 1000 - width):.0f} mm apart).")
+        print(f"  Saved to {f.relative_to(ROOT)} (median of the last {len(grips[-10:])} feels: {np.median(grips[-10:]) * 1000:.1f} mm)")
     return 0
 
 
