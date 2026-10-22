@@ -160,7 +160,7 @@ def cmd_teach(name):
     open_pct = g["max_open_pct"]
     r = run(f"pick-teach-{name}")
     eye = DownEye(name, r)
-    xy = np.array([0.20, 0.0])
+    xy = np.array([0.24, 0.0])                      # far enough out to back off up to ~13 cm (22 Oct test)
     try:
         with Arm() as arm:
             roll = arm.level_roll()
