@@ -471,24 +471,27 @@ RIGID_MM_PER_LOAD = 0.22   # how far the jaws still give per % of load on a HARD
                            # 21 Oct: 0.21-0.25): the gripper's own flex. Much more = a soft object.
 
 
-def find_contact(cmd, jaw, load, skip=4, base_min=4):
+def find_contact(cmd, jaw, load, skip=4, base_min=4, final=False):
     """Index of first contact while closing, or None (also None while it cannot be sure yet).
     - the first `skip` readings are the jaw speeding up (lag 0 -> 1.5 %, load 2 -> 8 %): ignored
       (22 Oct: counting them as contact "measured" 71 mm without touching anything)
     - the free-closing baseline is the median of at least `base_min` steady readings before it
     - contact: the jaw starts trailing the command, or the load rises, 2 readings in a row
     - confirmed only if the jaw is then held back MORE (lag +2 % within 3 readings): a real object
-      stops the jaw (the tape: lag grew to +7 %); a wobble does not"""
+      stops the jaw (the tape: lag grew to +7 %); a wobble does not
+    - final=True (closing has stopped, e.g. at the load limit): confirm with the readings there are
+      (22 Oct: a tape lying on the floor hit the load limit 3 readings after contact; waiting for a
+      4th reading reported "nothing" every time)"""
     lag = np.asarray(jaw, float) - np.asarray(cmd, float)
     load = np.asarray(load, float)
     for i in range(skip + base_min, len(lag) - 1):
         lag0, load0 = float(np.median(lag[skip:i])), float(np.median(load[skip:i]))
         if (lag[i] > lag0 + 0.5 and lag[i + 1] > lag0 + 0.5) or (load[i] > load0 + 5 and load[i + 1] > load0 + 5):
             later = lag[i:i + 4]
-            if len(later) < 4:
-                return None                            # not enough readings yet to confirm
             if later.max() > lag0 + 2:
                 return i
+            if len(later) < 4 and not final:
+                return None                            # not enough readings yet to confirm
     return None
 
 
@@ -509,8 +512,10 @@ def close_on(arm, start, r, step=2, hold=False):
         load.append(ld)
         r.log("grip", command_pct=pct, jaw_pct=jaw[-1], load_pct=ld)
         hit = find_contact(cmd, jaw, load)
-        if hit is not None or ld > 35:                    # confirmed (3 readings after contact)
+        if hit is not None or ld > 35:                    # confirmed, or squeezing hard: stop
             break
+    if hit is None:
+        hit = find_contact(cmd, jaw, load, final=True)    # stopped early: judge what was read
     if hit is None:
         return None
     touch = jaw[hit - 1]                                  # last reading before the jaw was held back
