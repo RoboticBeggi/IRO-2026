@@ -11,6 +11,6 @@ look_offset_gripper_m:
 mm_per_px: 0.2887
 note: grasp pixel = outline centre, recomputed from the teach recording (22 Oct 15:52)
 recording: /home/orin_nano/iro-runs/20261022-154407_pick-teach-Tape
-roll_sign: -1
+roll_sign: 1
 taught_width_mm: 24.0
 top_peak: 0.443
