@@ -9,9 +9,10 @@ camera calibration).
 
 Needs: `iro track teach NAME` (what it looks like) and `iro measure gripper` (jaw opening curve).
 How it works (calibration-free visual servoing, as `iro pick`):
-  look pose: gripper straight down LOOK_H above the floor; the wrist camera sees the floor below
-  grasp pixel: where the object appears when it is exactly between the jaws (taught), plus the
-    direction the jaws close in the picture and the mm per pixel on the floor
+  look pose: gripper straight down LOOK_H above the floor; the wrist camera sees the floor AHEAD
+    of the jaws (not between them), so it looks from a taught offset (in the gripper's frame)
+  grasp pixel: where the object appears from that offset when the jaws are exactly over it
+    (taught), plus the direction the jaws close in the picture and the mm per pixel
   centring: two small test moves measure how the picture moves with the arm (image Jacobian), then
     the arm steps sideways until the object sits on the grasp pixel
   turning: the object's outline (MobileSAM) gives its narrow direction; the wrist roll turns the
@@ -114,9 +115,41 @@ def look(arm, xy, roll, h=LOOK_H, duration=None):
     return arm.move_tip([xy[0], xy[1], table + h], roll=roll, duration=duration)
 
 
+def heading(arm):
+    """Direction (rad, on the floor) of the gripper's x axis: the wrist camera turns with it."""
+    x = arm.kin.fk(arm.joints(), "gripper_link")[:3, 0]
+    return float(np.arctan2(x[1], x[0]))
+
+
+def rot(a):
+    return np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+
+
+def floor_jacobian(arm, eye, xy, roll, step=0.02):
+    """How the whole picture (the floor) shifts per metre of tip motion (2x2), from two small test
+    moves and phase correlation: needs no object, only floor texture."""
+    from iro.lockon import gray_small, picture_shift
+    look(arm, xy, roll)
+    f0 = eye.frame()
+    J = np.zeros((2, 2))
+    for i in range(2):
+        p = xy.copy()
+        p[i] += step
+        look(arm, p, roll)
+        f1 = eye.frame()
+        J[:, i] = picture_shift(gray_small(f0), gray_small(f1), f0.shape[1])[0] / step
+    look(arm, xy, roll)
+    return J
+
+
 # ------------------------------------------------------------------ teach
 
 def cmd_teach(name):
+    """22 Oct: the wrist camera looks AHEAD of the jaws: straight above the object, the object is below
+    the bottom of the picture (the first teach "learnt" the tape's strap instead). So after letting go,
+    the arm backs off, in the direction that slides the picture up, until the whole object is in view
+    and you confirm it. That offset (in the gripper's own frame: the camera turns with the wrist) is
+    remembered: picking looks from the same offset, then moves over by it and descends."""
     from iro.measure import GRIPPER, close_on, opening_mm, set_gripper
     from iro.motion import Arm
     from iro.record import run
@@ -133,6 +166,10 @@ def cmd_teach(name):
             roll = arm.level_roll()
             set_gripper(arm, open_pct)
             look(arm, xy, roll)
+            J = floor_jacobian(arm, eye, xy, roll)       # before the object is there: plain floor
+            r.note(f"floor Jacobian px/m {np.round(J).tolist()}")
+            up = np.linalg.solve(J, [0.0, -1.0])         # tip move that slides the picture UP
+            up /= np.linalg.norm(up)
             look(arm, xy, roll, h=GRASP_H, duration=2.5)
             while True:
                 input(f"Slide the {name} between the open jaws ({opening_mm(open_pct):.0f} mm), centred, lying the way "
@@ -146,17 +183,44 @@ def cmd_teach(name):
             set_gripper(arm, open_pct)                      # let go WITHOUT moving it
             time.sleep(0.4)
             look(arm, xy, roll, duration=2.5)               # straight up
-            time.sleep(0.5)
-            f, box, c, peak = eye.find()
-            if box is None:
-                eye.show(f, f"cannot see the {name} from above", tag="teach_notseen")
-                print(f"  From above the {name} is not recognised (match too weak). Draw a box around it on the "
-                      "live page instead.")
-                box = eye.cam.feed.ask_box(f.shape, timeout=120)
-                if box is None:
+            psi = heading(arm)
+            chosen, off = None, np.zeros(2)
+            for k in range(0, 6):                           # back off 0, 3, 6 ... 15 cm until it is in view
+                off = k * 0.03 * up
+                try:
+                    look(arm, xy + off, roll)
+                except Exception as e:                      # noqa: BLE001 - out of reach: stop backing off
+                    r.note(f"offset {k * 3} cm unreachable: {e}")
+                    break
+                time.sleep(0.3)
+                f, box, c, peak = eye.find()
+                h_, w_ = f.shape[:2]
+                inside = box is not None and box[0] > 8 and box[1] > 8 and box[2] < w_ - 8 and box[3] < h_ - 8
+                eye.show(f, f"offset {k * 3} cm: " + (f"is this the {name}? (match {peak:.2f})" if inside else "not fully in view"),
+                         box if inside else None, tag=f"teach_offset{k * 3:02d}")
+                if not inside:
+                    continue
+                a_ = input(f"  {k * 3} cm back: is the GREEN box on the {name} (live page)? Enter = yes, n = look further, "
+                           "d = draw it: ").strip().lower()
+                if a_ == "d":
+                    b_ = eye.cam.feed.ask_box(f.shape, timeout=120)
+                    if b_ is not None:
+                        box = np.array(b_, float)
+                        c = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
+                        chosen = (off, f, box, c)
+                        break
+                elif a_ != "n":
+                    chosen = (off, f, box, c)
+                    break
+            if chosen is None:
+                print(f"  Not found automatically. Drag a box around the {name} on the live page (2 min).")
+                f = eye.frame()
+                b_ = eye.cam.feed.ask_box(f.shape, timeout=120)
+                if b_ is None:
                     return 1
-                box = np.array(box, float)
-                c = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
+                box = np.array(b_, float)
+                chosen = (off, f, box, np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]))
+            off, f, box, c = chosen
             out = eye.outline(f, box)
             if out is None:
                 print("  Could not outline it (SAM). Try again with less clutter around it.")
@@ -173,18 +237,20 @@ def cmd_teach(name):
             eye.pm.save(name)
             s_map, _ = eye.pm.score_map(f)
             top_peak = float(s_map[eye.pm.small(mask > 0)].max())
-            eye.show(f, f"grasp pixel ({c[0]:.0f},{c[1]:.0f}); jaws close at {jaw_deg:.0f} deg; {mm_per_px:.2f} mm/px",
-                     box, c, "teach_result")
+            off_local = rot(-psi) @ off                     # in the gripper's own frame
+            eye.show(f, f"grasp pixel ({c[0]:.0f},{c[1]:.0f}) from {np.linalg.norm(off) * 100:.0f} cm back; "
+                        f"jaws {jaw_deg:.0f} deg; {mm_per_px:.2f} mm/px", box, c, "teach_result")
     finally:
         eye.close()
     data = {"grasp_pixel": [round(float(c[0]), 1), round(float(c[1]), 1)], "jaw_axis_deg": round(jaw_deg, 1),
+            "look_offset_gripper_m": [round(float(v), 4) for v in off_local],
             "mm_per_px": round(mm_per_px, 4), "look_h_m": LOOK_H, "grasp_h_m": GRASP_H,
             "taught_width_mm": round(grip["width_mm"], 1), "roll_sign": 1, "top_peak": round(top_peak, 3),
             "recording": str(r.dir), "date": time.strftime("%Y-%m-%d %H:%M")}
     grasp_file(name).write_text(yaml.safe_dump(data))
     r.note(f"taught: {data}")
-    print(f"Taught. The {name} sits at pixel {data['grasp_pixel']} when it is between the jaws "
-          f"(seen from {LOOK_H * 100:.0f} cm up). Next: iro pick {name}")
+    print(f"Taught. Seen from {np.linalg.norm(off) * 100:.0f} cm back, the {name} sits at pixel {data['grasp_pixel']} "
+          f"when the jaws are over it. Next: iro pick {name}")
     return 0
 
 
@@ -302,7 +368,10 @@ def cmd_pick(name, drop=False):
             set_gripper(arm, open_pct)
             eye.show(f, f"4. opening {want:.0f} mm for {width or 0:.0f} mm", box, target, "4_open")
             print(f"4. it is about {width or G['taught_width_mm']:.0f} mm across: opening {want:.0f} mm")
-            # 5. straight down, close until contact
+            # 5. over it (the camera looked from an offset), straight down, close until contact
+            off = np.array(G.get("look_offset_gripper_m", [0.0, 0.0]))
+            xy = xy - rot(heading(arm)) @ off
+            look(arm, xy, roll, duration=1.5)
             look(arm, xy, roll, h=G["grasp_h_m"], duration=2.5)
             grip = close_on(arm, open_pct, r, hold=True)
             if grip is None:
