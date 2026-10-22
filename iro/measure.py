@@ -3,6 +3,7 @@
     iro measure                every object on the floor in front of the robot: L x W x H (OAK-D)
     iro measure NAME           measure one object and save it to objects/NAME/size.yaml
                                (--looks N: turn it between looks; sizes are combined per side)
+    iro measure NAME --from RUN [RUN..]   re-measure from recorded looks (no camera needed)
     iro measure gripper        the jaws' real opening (mm) at each gripper %, from the arm's own 3D
                                model + servo calibration: saves config/gripper.yaml
     iro measure feel [NAME]    the gripper as a caliper: width at FIRST CONTACT, and how soft it is
@@ -171,6 +172,19 @@ def look(oak, fl, n=3):
     return img, base
 
 
+def fuse(results):
+    """Combine looks. Each look: its three sizes largest first, each (metres, only_a_lower_bound).
+    Per rank: the median of the side-on (reliable) values. End-on "at least" values are used only
+    when no side-on value exists: they are noisy both ways (22 Oct, the tape's thickness: end-on
+    1.4-3.3 cm, side-on 2.4 cm, gripper 2.65 cm). Returns [(metres, only_at_least)]."""
+    final = []
+    for k in range(3):
+        good = [res[k][0] for res in results if not res[k][1]]
+        low = [res[k][0] for res in results if res[k][1]]
+        final.append((float(np.median(good)), False) if good else (float(max(low)), True))
+    return final
+
+
 def cmd_objects(name=None, looks=1):
     from iro.efad import floor_plane, load_calib
     from iro.oak import Oak
@@ -233,18 +247,11 @@ def cmd_objects(name=None, looks=1):
                                        (pick["width"], pick["hidden"] == "width"),
                                        (pick["height"], False)], reverse=True))
         if name and results:
-            # each look: its three sizes, largest first, each flagged if only a lower bound. The
-            # object's sizes = the largest seen at each rank over the looks (hiding only ever
-            # makes a side look smaller; stray points are trimmed); "at least" if never seen whole
-            final = []
-            for k in range(3):
-                best = max((res[k] for res in results), key=lambda t: t[0])
-                seen = any(not res[k][1] and res[k][0] >= 0.9 * best[0] for res in results)
-                final.append((best[0], not seen))
+            final = fuse(results)
             L, W, H = (f[0] for f in final)
             low = [n_ for n_, f in zip(("largest", "middle", "smallest"), final) if f[1]]
             if low:
-                print(f"  Note: the {', '.join(low)} side was only seen end-on (its back hidden): it is AT LEAST "
+                print(f"  Note: the {', '.join(low)} side was never seen side-on (its back hidden): it is AT LEAST "
                       "that. Turn the object so that side faces the camera, and measure again.")
             from iro.objects import OBJ_DIR
             out = OBJ_DIR / name / "size.yaml"
@@ -253,13 +260,58 @@ def cmd_objects(name=None, looks=1):
             old.update({"length_m": round(float(L), 4), "width_m": round(float(W), 4),
                         "height_m": round(float(H), 4), "looks": len(results),
                         "sizes_are": "largest, middle, smallest side (not tied to how it lies)",
-                        "at_least": [n_ for n_, f in zip(("length_m", "width_m", "height_m"), final) if f[1]],
+                        "at_least": [n_ for n_, f in zip(("largest", "middle", "smallest"), final) if f[1]],
                         "method": "OAK-D floor dimensioning", "recording": str(r.dir),
                         "date": time.strftime("%Y-%m-%d %H:%M")})
             out.write_text(yaml.safe_dump(old))
             print(f"Saved {name}: {L * 100:.1f} x {W * 100:.1f} x {H * 100:.1f} cm -> {out.relative_to(ROOT)}")
     finally:
         oak.close()
+    return 0
+
+
+class _Lens:
+    """Stand-in for the OAK-D when re-measuring a recorded look: just the lens numbers."""
+
+    def __init__(self, K):
+        self.K = K
+
+    def points(self, depth, mask):
+        from iro.oak import Oak
+        return Oak.points(self, depth, mask)
+
+
+def remeasure(name, runs):
+    """Re-measure NAME from recorded looks (lookN_raw.npz in each run) with today's method, no
+    camera needed, and save it. The biggest object in each look is taken (as when measuring)."""
+    from iro.objects import OBJ_DIR
+    from iro.record import RUNS
+    results = []
+    for rn in runs:
+        d = RUNS / rn if (RUNS / rn).exists() else __import__("pathlib").Path(rn)
+        for f in sorted(d.glob("look*_raw.npz")):
+            z = np.load(f)
+            objs = floor_objects(_Lens(z["K"]), z["depth"], (z["floor_n"], float(z["floor_d"])))
+            if not objs:
+                print(f"  {d.name}/{f.name}: nothing found")
+                continue
+            o = objs[0]
+            results.append(sorted([(o["length"], o["hidden"] == "length"), (o["width"], o["hidden"] == "width"),
+                                   (o["height"], False)], reverse=True))
+            print(f"  {d.name}/{f.name}: " + " x ".join(f"{'at least ' if lb else ''}{v * 100:.1f}" for v, lb in results[-1]) + " cm")
+    if not results:
+        return 1
+    final = fuse(results)
+    out = OBJ_DIR / name / "size.yaml"
+    size = yaml.safe_load(out.read_text()) if out.exists() else {}
+    size.update({"length_m": round(final[0][0], 4), "width_m": round(final[1][0], 4), "height_m": round(final[2][0], 4),
+                 "looks": len(results), "sizes_are": "largest, middle, smallest side (not tied to how it lies)",
+                 "at_least": [n_ for n_, f in zip(("largest", "middle", "smallest"), final) if f[1]],
+                 "method": "OAK-D floor dimensioning (re-measured from recordings)", "recording": [str(r) for r in runs],
+                 "date": time.strftime("%Y-%m-%d %H:%M")})
+    out.write_text(yaml.safe_dump(size))
+    print(f"{name}: " + " x ".join(f"{'at least ' if lb else ''}{v * 100:.1f}" for v, lb in final)
+          + f" cm (largest x middle x smallest, {len(results)} looks) -> {out.relative_to(ROOT)}")
     return 0
 
 
@@ -419,17 +471,24 @@ RIGID_MM_PER_LOAD = 0.22   # how far the jaws still give per % of load on a HARD
                            # 21 Oct: 0.21-0.25): the gripper's own flex. Much more = a soft object.
 
 
-def find_contact(cmd, jaw, load, base_n=8):
-    """Index of first contact while closing: the jaw starts trailing the command, or the load rises,
-    for 2 readings in a row (one spike does not count). Before that the jaw trails by a steady
-    ~1.5% and the load sits at ~8% (21 Oct)."""
-    lag = np.asarray(jaw) - np.asarray(cmd)
-    n = min(base_n, max(1, len(lag) - 2))
-    lag0 = float(np.median(lag[:n])) if len(lag) >= 4 else 1.5
-    load0 = float(np.median(load[:n])) if len(load) >= 4 else 8.0
-    for i in range(1, len(lag) - 1):
+def find_contact(cmd, jaw, load, skip=4, base_min=4):
+    """Index of first contact while closing, or None (also None while it cannot be sure yet).
+    - the first `skip` readings are the jaw speeding up (lag 0 -> 1.5 %, load 2 -> 8 %): ignored
+      (22 Oct: counting them as contact "measured" 71 mm without touching anything)
+    - the free-closing baseline is the median of at least `base_min` steady readings before it
+    - contact: the jaw starts trailing the command, or the load rises, 2 readings in a row
+    - confirmed only if the jaw is then held back MORE (lag +2 % within 3 readings): a real object
+      stops the jaw (the tape: lag grew to +7 %); a wobble does not"""
+    lag = np.asarray(jaw, float) - np.asarray(cmd, float)
+    load = np.asarray(load, float)
+    for i in range(skip + base_min, len(lag) - 1):
+        lag0, load0 = float(np.median(lag[skip:i])), float(np.median(load[skip:i]))
         if (lag[i] > lag0 + 0.5 and lag[i + 1] > lag0 + 0.5) or (load[i] > load0 + 5 and load[i + 1] > load0 + 5):
-            return i
+            later = lag[i:i + 4]
+            if len(later) < 4:
+                return None                            # not enough readings yet to confirm
+            if later.max() > lag0 + 2:
+                return i
     return None
 
 
@@ -451,7 +510,6 @@ def cmd_feel(name=None):
         input(f"Hold the object between the jaws (open {opening_mm(start):.0f} mm now), then Enter to close gently. ")
         c = arm.cal["gripper"]
         cmd, jaw, load = [], [], []
-        after = 0
         for pct in np.arange(start, -1, -2):
             arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, pct), normalize=False)
             time.sleep(0.08)
@@ -462,14 +520,13 @@ def cmd_feel(name=None):
             load.append(ld)
             r.log("feel", command_pct=pct, jaw_pct=jaw[-1], load_pct=ld)
             c_ = find_contact(cmd, jaw, load) if c_ is None else c_
-            if c_ is not None:
-                after += 1
-                if after >= 4 or ld > 35:                  # felt the squeeze: enough
-                    break
+            if c_ is not None or ld > 35:                  # confirmed (3 readings after contact)
+                break
         if c_ is None:
             set_gripper(arm, start)
-            print("The jaws closed all the way without touching anything.")
-            r.note("no contact")
+            print("Nothing was gripped: the jaws closed without being held back by anything. Nothing saved. "
+                  "Hold the object between the fingertips and try again.")
+            r.note("no contact: nothing saved")
             return 1
         touch = jaw[c_ - 1]                                # last reading before the jaw was held back
         set_gripper(arm, touch + 6)                        # let go of the squeeze
@@ -503,6 +560,7 @@ def main():
     a = sys.argv[1:]
     looks = int(a[a.index("--looks") + 1]) if "--looks" in a else 1
     a = [x for i, x in enumerate(a) if not x.startswith("--") and (i == 0 or a[i - 1] != "--looks")]
+    a = a[:1] if "--from" in sys.argv else a
     if a and a[0] == "gripper":
         return cmd_gripper()
     if a and a[0] == "feel":
@@ -510,6 +568,8 @@ def main():
     if a and a[0] in ("-h", "help"):
         print(__doc__)
         return 0
+    if a and "--from" in sys.argv:
+        return remeasure(a[0], sys.argv[sys.argv.index("--from") + 1:])
     return cmd_objects(a[0] if a else None, looks)
 
 

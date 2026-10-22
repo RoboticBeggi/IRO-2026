@@ -1,7 +1,18 @@
-date: 2026-10-22 15:01
-height_m: 0.0577
-length_m: 0.0641
-looks: 3
-method: OAK-D floor dimensioning
-recording: /home/orin_nano/iro-runs/20261022-150115_measure-Tape
-width_m: 0.0242
+at_least: []
+date: 2026-10-22 15:14
+grip_note: first-contact widths re-analysed from the 22 Oct 15:02 feel recordings;
+  two false 71.4 mm readings removed
+grip_width_m: 0.0265
+grip_widths_m:
+- 0.0268
+- 0.0264
+- 0.0265
+height_m: 0.0239
+length_m: 0.0592
+looks: 6
+method: OAK-D floor dimensioning (re-measured from recordings)
+recording:
+- 20261022-150943_measure-Tape
+- 20261022-151047_measure-Tape
+sizes_are: largest, middle, smallest side (not tied to how it lies)
+width_m: 0.0545
