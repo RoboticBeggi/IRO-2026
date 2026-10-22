@@ -16,7 +16,6 @@ bsdutils
 bzip2
 can-utils
 cmake
-cmake-data
 code
 containerd.io
 coreutils
@@ -349,7 +348,6 @@ libtbb2
 libtbb-dev
 libtbbmalloc2
 libtesseract4
-libtiff-dev
 libtiffxx5
 libtinfo6
 libtirpc3

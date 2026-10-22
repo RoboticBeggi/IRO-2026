@@ -18,8 +18,9 @@ How it works (calibration-free visual servoing, as `iro pick`):
   turning: the object's outline (MobileSAM) gives its narrow direction; the wrist roll turns the
     jaws across it while the camera ORBITS around the object (it sits 12 cm off the roll axis, so
     turning in place swings the view away); the sign is checked by looking again, and remembered
-  grasping: open to the object's width + 15 mm (iro measure gripper), straight down, close until
-    FIRST CONTACT (iro measure close_on), check the width is plausible, lift, check it is still held
+  grasping: open fully (the last centimetres are blind), straight down (leaning outward when it is
+    far: iro arm reach), close until FIRST CONTACT (iro measure close_on), check the width matches
+    the taught one, lift, squeeze-test that it is still held. The OAK-D films it all from the side.
 Every run is recorded (iro review): a picture per step, the grip log, the decisions.
 """
 
@@ -32,8 +33,6 @@ import yaml
 
 LOOK_H = 0.15              # m above the floor for looking down
 GRASP_H = 0.012            # m above the floor where the fingertips close (half a lying tape)
-MARGIN_MM = 30             # open this much wider (at least 50 mm): the last centimetres are blind
-                           # (22 Oct: +15 mm knocked a standing tape over)
 SERVO_TOL_PX = 8           # outline centre; the arm itself repeats to ~3 mm (~6 px)
 SEARCH = [(0.20, 0.0), (0.24, 0.0), (0.20, 0.07), (0.20, -0.07), (0.16, 0.0), (0.24, 0.07), (0.24, -0.07)]
 
@@ -181,7 +180,7 @@ def plan_reach(arm, xy, roll, h_grasp, step_deg=5, quick=False):
 
     degs = range(0, int(max_lean_deg()) + 1, step_deg)
     if quick:                                      # reachable at all? (the full search takes ~10 s far out)
-        degs = [0, 30, int(max_lean_deg())]
+        degs = list(range(0, int(max_lean_deg()) + 1, 10))   # 22 Oct: [0, 30, 64] missed a 40 cm tape that 45 reaches
     for deg in degs:
         t = -np.radians(deg)                       # ik_down: negative = leaning outward
         if not ok(h_grasp, t) or not ok(0.10, t):
@@ -239,6 +238,59 @@ def floor_jacobian(arm, eye, xy, roll, step=0.02):
         J[:, i] = picture_shift(gray_small(f0), gray_small(f1), f0.shape[1])[0] / step
     look(arm, xy, roll)
     return J
+
+
+class SideCam:
+    """The OAK-D films the whole pick from the side (feed `oak` in the recording). The wrist camera
+    cannot see the jaws' last centimetres (it looks ahead of them), so this is the only view of
+    what knocks the object over (22 Oct: a standing tape was tipped flat by the descent).
+    Best effort: no OAK-D, no side view; picking goes on."""
+
+    def __init__(self, r, fps=6):
+        import threading
+        self.r, self.stage, self.ok, self.stop_ = r, "start", False, False
+        try:
+            from iro.oak import Oak
+            self.oak = Oak(ir=0.0)
+            self.ok = True
+        except Exception as e:                     # noqa: BLE001 - side view is optional
+            r.note(f"no OAK-D side view: {str(e)[:80]}")
+            return
+        self.t = threading.Thread(target=self._loop, args=(1 / fps,), daemon=True)
+        self.t.start()
+
+    def _loop(self, dt):
+        while not self.stop_:
+            try:
+                img, _ = self.oak.read(1)
+                self.r.video("oak", img, [self.stage])
+            except Exception as e:                 # noqa: BLE001 - keep picking without it
+                self.r.note(f"OAK-D side view stopped: {str(e)[:80]}")
+                return
+            time.sleep(dt)
+
+    def close(self):
+        if self.ok:
+            self.stop_ = True
+            self.t.join(timeout=3)
+            self.oak.close()
+
+
+def holding(arm, grip, r, squeeze=12, slack_mm=9):
+    """Squeeze test: aim `squeeze` % further closed for a moment. Holding it, the jaws stay near the
+    grip width; empty, they close ~18 mm further. (22 Oct: the old test, "did the jaws close
+    further while lifting", said "holding" over a tape left on the floor: the carrying grip
+    only aims 4 % past contact, so empty jaws barely move.)"""
+    from iro.measure import HOLD_PCT, gripper_raw, opening_mm
+    c = arm.cal["gripper"]
+    arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, max(0.0, grip["touch_pct"] - squeeze)), normalize=False)
+    time.sleep(0.6)
+    now = 100 * (arm.bus.read("Present_Position", "gripper", normalize=False) - c["range_min"]) / (
+        c["range_max"] - c["range_min"])
+    arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, max(0.0, grip["touch_pct"] - HOLD_PCT)), normalize=False)
+    mm = opening_mm(now)
+    r.note(f"squeeze test: jaws at {mm:.1f} mm (gripped at {grip['width_mm']:.1f})")
+    return mm >= grip["width_mm"] - slack_mm, mm
 
 
 # ------------------------------------------------------------------ teach
@@ -421,7 +473,7 @@ def find_from(arm, eye, starts, roll):
 def cmd_pick(name, drop=False, attempts=3):
     """Find, centre, turn, open, descend feeling for blockages, close until contact, lift, check.
     A miss is looked at again (did it move?) and retried, up to `attempts` times."""
-    from iro.measure import close_on, max_open_m, opening_mm, pct_for, set_gripper
+    from iro.measure import close_on, max_open_m, pct_for, set_gripper
     from iro.motion import Arm, MotionError
     from iro.record import run
     gf = grasp_file(name)
@@ -433,6 +485,7 @@ def cmd_pick(name, drop=False, attempts=3):
     off = np.array(G.get("look_offset_gripper_m", [0.0, 0.0]))
     r = run(f"pick-{name}")
     eye = DownEye(name, r)
+    side = SideCam(r)
     if G.get("top_peak"):
         eye.min_peak = 0.5 * G["top_peak"]          # seen from above it must match like it did then
     starts = list(SEARCH)
@@ -519,7 +572,9 @@ def cmd_pick(name, drop=False, attempts=3):
                           "less than 8 mm of room each side for a blind descent. Turn it so a narrower side faces up "
                           "(e.g. stand the tape on its edge).")
                     return 1
-                want = min(max_open_m() * 1000, max(w + MARGIN_MM, 50.0))
+                # fully open, always (22 Oct: 56-60 mm still tipped a standing tape over; teach also
+                # closed from fully open, so the taught grasp pixel matches this jaw position)
+                want = max_open_m() * 1000
                 open_pct = pct_for(want)
                 set_gripper(arm, open_pct)
                 eye.show(f, f"4. opening {want:.0f} mm for {w:.0f} mm", box, target, tag + "4_open")
@@ -537,9 +592,11 @@ def cmd_pick(name, drop=False, attempts=3):
                     print(f"   leaning the gripper {np.degrees(-tilt):.0f} deg outward to reach it "
                           f"({np.linalg.norm(gxy) * 100:.0f} cm out)")
                 r.note(f"over at {over_h * 100:.0f} cm, lean {np.degrees(-tilt):.0f} deg")
+                side.stage = f"{attempt}: over it, going down (lean {np.degrees(-tilt):.0f})"
                 look(arm, gxy, roll, h=over_h, duration=1.5, tilt=tilt)
                 log_pose(arm, r, "over", attempt=attempt, grasp_xy=np.round(gxy, 4).tolist())
                 reached = descend(arm, gxy, roll, G["grasp_h_m"], r, tilt=tilt)
+                side.stage = f"{attempt}: closing" if reached else f"{attempt}: blocked"
                 grip = close_on(arm, open_pct, r, hold=True) if reached else None
                 log_pose(arm, r, "closed" if grip else ("blocked" if not reached else "missed"), attempt=attempt)
                 if grip is None:
@@ -562,17 +619,27 @@ def cmd_pick(name, drop=False, attempts=3):
                     starts = [look_xy] + list(SEARCH)
                     continue
                 print(f"5. gripped: {grip['width_mm']:.0f} mm between the fingertips (expected ~{w:.0f}), {grip['feel']}")
-                if abs(grip["width_mm"] - w) > 20:
-                    print("   (that width does not match: it may be holding it by a corner)")
+                taught = G["taught_width_mm"]
+                if abs(grip["width_mm"] - taught) > 8:
+                    # 22 Oct: 39 mm on a tape taught at 24 mm = it had been tipped flat; lifting failed
+                    set_gripper(arm, open_pct)
+                    look(arm, gxy, roll, h=over_h, duration=1.5, tilt=tilt)
+                    eye.show(eye.frame(), f"5. {grip['width_mm']:.0f} mm, taught {taught:.0f} mm: lying differently",
+                             tag=tag + "5_wrongwidth")
+                    print(f"   That is {grip['width_mm']:.0f} mm, but it was taught at {taught:.0f} mm: it is not lying "
+                          f"the way it was taught (knocked over?). Let go. Stand it up as taught and run again.")
+                    r.note(f"width {grip['width_mm']:.1f} vs taught {taught}: not as taught")
+                    return 1
                 # 6. lift and check it is still held
+                side.stage = f"{attempt}: lifting"
                 look(arm, gxy, roll, h=0.10, duration=2.0, tilt=tilt)
                 time.sleep(0.3)
-                c_ = arm.cal["gripper"]
-                now = 100 * (arm.bus.read("Present_Position", "gripper", normalize=False) - c_["range_min"]) / (
-                    c_["range_max"] - c_["range_min"])
-                if opening_mm(now) < grip["width_mm"] - 10:
-                    print("6. Dropped it while lifting (the jaws closed further).")
-                    r.note("dropped while lifting")
+                held, mm = holding(arm, grip, r)
+                if not held:
+                    print(f"6. Not holding it after lifting: a squeeze closed the jaws to {mm:.0f} mm (gripped at "
+                          f"{grip['width_mm']:.0f}). It slipped out or was never really between the jaws.")
+                    r.note("not held after lifting")
+                    set_gripper(arm, open_pct)
                     return 1
                 log_pose(arm, r, "lifted", attempt=attempt)
                 f, *_ = eye.find()
@@ -580,6 +647,7 @@ def cmd_pick(name, drop=False, attempts=3):
                 print(f"6. Holding the {name}, 10 cm up (try {attempt}).")
                 r.note(f"picked on try {attempt}: width {grip['width_mm']:.1f} mm at ({gxy[0]:.3f}, {gxy[1]:.3f})")
                 if drop:
+                    side.stage = f"{attempt}: putting it down"
                     look(arm, gxy, roll, h=G["grasp_h_m"] + 0.005, duration=2.0, tilt=tilt)
                     set_gripper(arm, open_pct)
                     look(arm, gxy, roll, h=over_h, duration=2.0, tilt=tilt)
@@ -593,6 +661,7 @@ def cmd_pick(name, drop=False, attempts=3):
         return 1
     finally:
         eye.close()
+        side.close()
 
 
 def main():
