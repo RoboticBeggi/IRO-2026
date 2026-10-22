@@ -492,6 +492,40 @@ def find_contact(cmd, jaw, load, skip=4, base_min=4):
     return None
 
 
+def close_on(arm, start, r, step=2, hold=False):
+    """Close from `start` % until FIRST CONTACT (find_contact). Returns None if nothing was gripped
+    (the jaws end closed), else {touch_pct, width_mm, give_mm, softness, feel}. hold=True keeps the
+    light squeeze (for carrying); else the jaws are left where they stopped."""
+    c = arm.cal["gripper"]
+    cmd, jaw, load = [], [], []
+    hit = None
+    for pct in np.arange(start, -1, -step):
+        arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, pct), normalize=False)
+        time.sleep(0.08)
+        pos = arm.bus.read("Present_Position", "gripper", normalize=False)
+        ld = abs(arm.bus.read("Present_Load", "gripper", normalize=False)) / 10
+        cmd.append(float(pct))
+        jaw.append(100 * (pos - c["range_min"]) / (c["range_max"] - c["range_min"]))
+        load.append(ld)
+        r.log("grip", command_pct=pct, jaw_pct=jaw[-1], load_pct=ld)
+        hit = find_contact(cmd, jaw, load)
+        if hit is not None or ld > 35:                    # confirmed (3 readings after contact)
+            break
+    if hit is None:
+        return None
+    touch = jaw[hit - 1]                                  # last reading before the jaw was held back
+    width = opening_mm(touch)
+    give = width - opening_mm(jaw[-1])
+    per_load = give / max(load[-1] - load[hit - 1], 1)
+    soft = per_load / RIGID_MM_PER_LOAD
+    feel = "hard" if soft < 1.6 else ("a bit soft" if soft < 4 else "soft (squashes)")
+    r.note(f"contact {touch:.2f}% -> {width:.1f} mm; give {give:.1f} mm, {per_load:.3f} mm/% load, softness x{soft:.1f}")
+    if not hold:
+        arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, jaw[-1]), normalize=False)
+    return {"touch_pct": touch, "width_mm": width, "give_mm": give, "softness": soft, "feel": feel,
+            "held_pct": jaw[-1]}
+
+
 def cmd_feel(name=None):
     """The gripper as a caliper: close slowly, note the jaw position at FIRST CONTACT (the width),
     squeeze a little more to feel how soft it is, let go. 21 Oct: the first version reported where
@@ -504,40 +538,20 @@ def cmd_feel(name=None):
     g = yaml.safe_load(GRIPPER.read_text())
     start = min(100, g["max_open_pct"] + 6)                # widest opening with the fingertips in line
     r = run(f"measure-feel-{name}" if name else "measure-feel")
-    c_ = None
     with Arm() as arm:
         set_gripper(arm, start)
         input(f"Hold the object between the jaws (open {opening_mm(start):.0f} mm now), then Enter to close gently. ")
-        c = arm.cal["gripper"]
-        cmd, jaw, load = [], [], []
-        for pct in np.arange(start, -1, -2):
-            arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, pct), normalize=False)
-            time.sleep(0.08)
-            pos = arm.bus.read("Present_Position", "gripper", normalize=False)
-            ld = abs(arm.bus.read("Present_Load", "gripper", normalize=False)) / 10
-            cmd.append(float(pct))
-            jaw.append(100 * (pos - c["range_min"]) / (c["range_max"] - c["range_min"]))
-            load.append(ld)
-            r.log("feel", command_pct=pct, jaw_pct=jaw[-1], load_pct=ld)
-            c_ = find_contact(cmd, jaw, load) if c_ is None else c_
-            if c_ is not None or ld > 35:                  # confirmed (3 readings after contact)
-                break
-        if c_ is None:
+        g_ = close_on(arm, start, r)
+        if g_ is None:
             set_gripper(arm, start)
             print("Nothing was gripped: the jaws closed without being held back by anything. Nothing saved. "
                   "Hold the object between the fingertips and try again.")
             r.note("no contact: nothing saved")
             return 1
-        touch = jaw[c_ - 1]                                # last reading before the jaw was held back
-        set_gripper(arm, touch + 6)                        # let go of the squeeze
-    width = opening_mm(touch)
-    give = width - opening_mm(jaw[-1])
-    per_load = give / max(load[-1] - load[c_ - 1], 1)
-    soft = per_load / RIGID_MM_PER_LOAD
-    feel = "hard" if soft < 1.6 else ("a bit soft" if soft < 4 else "soft (squashes)")
-    print(f"First contact at {touch:.1f}%: the object is {width:.1f} mm wide between the fingertips. "
-          f"It gave {give:.1f} mm when squeezed ({per_load:.2f} mm per % load, {soft:.1f}x the gripper's own flex): {feel}.")
-    r.note(f"contact {touch:.2f}% -> {width:.1f} mm; give {give:.1f} mm, {per_load:.3f} mm/% load, softness x{soft:.1f}")
+        set_gripper(arm, g_["touch_pct"] + 6)              # let go of the squeeze
+    width, soft, feel = g_["width_mm"], g_["softness"], g_["feel"]
+    print(f"First contact at {g_['touch_pct']:.1f}%: the object is {width:.1f} mm wide between the fingertips. "
+          f"It gave {g_['give_mm']:.1f} mm when squeezed ({soft:.1f}x the gripper's own flex): {feel}.")
     if name:
         from iro.objects import OBJ_DIR
         f = OBJ_DIR / name / "size.yaml"

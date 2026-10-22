@@ -259,6 +259,12 @@ def do_teach(args, cfg):
 
 
 def main():
+    # objects taught with `iro track teach NAME` are picked by the wrist-camera grasp (iro/grasp.py)
+    from iro.lockon import BANKS
+    a = sys.argv[1:]
+    if (len(a) >= 2 and a[0] == "teach") or (a and (BANKS / f"{a[0]}.patches.npz").exists()):
+        from iro.grasp import main as grasp_main
+        return grasp_main()
     p = argparse.ArgumentParser(prog="iro pick", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("object", nargs="?", help="YOLO class to pick, or: look | teach")
     p.add_argument("--dry-run", action="store_true")

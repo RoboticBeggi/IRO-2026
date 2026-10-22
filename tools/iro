@@ -48,6 +48,8 @@ EFAD (Embedded Foundational Augmented Detection) - live view: http://localhost:8
   iro feed                the always-on live page: status / stop / restart / install (at boot)
   iro review [RUN|list]   look back at a recorded run (every camera program records itself)
   iro object show NAME    INSTANT: show an object ~15 s and name it; recognised at once
+  iro pick teach NAME     once: slide NAME between the lowered jaws; it learns the grasp from above
+  iro pick NAME           pick NAME up from the floor with the wrist camera (--drop puts it back)
   iro measure [NAME]      L x W x H of objects on the floor (OAK-D); NAME saves it (--looks N)
   iro measure gripper     real jaw opening at every gripper % (OAK-D); max opening
   iro measure feel [NAME] width of what the gripper holds, from where the jaws stop

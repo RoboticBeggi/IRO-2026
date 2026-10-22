@@ -1,12 +1,14 @@
 at_least: []
 date: 2026-10-22 15:14
+feel: hard
 grip_note: first-contact widths re-analysed from the 22 Oct 15:02 feel recordings;
   two false 71.4 mm readings removed
-grip_width_m: 0.0265
+grip_width_m: 0.0267
 grip_widths_m:
 - 0.0268
 - 0.0264
 - 0.0265
+- 0.0268
 height_m: 0.0239
 length_m: 0.0592
 looks: 6
@@ -14,5 +16,14 @@ method: OAK-D floor dimensioning (re-measured from recordings)
 recording:
 - 20261022-150943_measure-Tape
 - 20261022-151047_measure-Tape
+ruler:
+  note: 'by the user with the tape''s own blade, 22 Oct: diameter 7.6, other diameter
+    6, height ~7, thickness 2.5 cm'
+  sizes_m:
+  - 0.076
+  - 0.07
+  - 0.06
+  thickness_m: 0.025
 sizes_are: largest, middle, smallest side (not tied to how it lies)
+softness: 1.26
 width_m: 0.0545
