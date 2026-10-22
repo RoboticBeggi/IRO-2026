@@ -76,10 +76,37 @@ class DownEye:
 
     def outline(self, f, box):
         """Object mask, narrow-direction angle (deg, picture) and its extent (px) along `axis_deg`."""
-        got = self.sam.refine(f, box)
-        if got is None:
+        # raw SAM outline from the box (Refiner.refine rejects outlines < 70 % of the box, which
+        # throws away the right answer for a loose hand-drawn box: 22 Oct teach)
+        # A white object on a light floor is low contrast: with a loose box SAM sometimes outlines
+        # only the dark strap (9 % of the box). Try: box; box + a point at its centre; the patch
+        # matcher's own map inside the box. First one of a plausible size wins.
+        box = [float(v) for v in box]
+        area_box = max(1.0, (box[2] - box[0]) * (box[3] - box[1]))
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        mask = None
+        for kw in ({"bboxes": [box]}, {"bboxes": [box], "points": [[cx, cy]], "labels": [1]}):
+            res = self.sam.sam(f, verbose=False, **kw)[0]
+            if res.masks is not None:
+                m = res.masks.data[0].cpu().numpy().astype(np.uint8)
+                if 0.15 * area_box < m.sum() < 1.1 * area_box:
+                    mask = m
+                    break
+        if mask is None:
+            s_map, _ = self.pm.score_map(f)
+            m = cv2.resize((s_map > 0).astype(np.uint8), (f.shape[1], f.shape[0]), interpolation=cv2.INTER_NEAREST)
+            inbox = np.zeros_like(m)
+            inbox[int(box[1]):int(box[3]), int(box[0]):int(box[2])] = 1
+            m = m & inbox
+            n, lab, st, _ = cv2.connectedComponentsWithStats(m)
+            if n > 1:
+                k = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+                m = (lab == k).astype(np.uint8)
+                if 0.15 * area_box < m.sum() < 1.1 * area_box:
+                    mask = m
+                    self.r.note("outline from the patch matcher (SAM did not fit)")
+        if mask is None:
             return None
-        _, mask = got
         ys, xs = np.nonzero(mask)
         pts = np.c_[xs, ys].astype(float)
         c = pts.mean(0)
@@ -221,9 +248,12 @@ def cmd_teach(name):
                 box = np.array(b_, float)
                 chosen = (off, f, box, np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2]))
             off, f, box, c = chosen
+            eye.r.snap("teach_raw", f)                     # raw picture: can be re-done from the recording
+            np.save(eye.r.dir / "teach_box.npy", np.asarray(box, float))
             out = eye.outline(f, box)
             if out is None:
-                print("  Could not outline it (SAM). Try again with less clutter around it.")
+                print("  Could not outline it (SAM): the outline spilled over the floor or was a speck. Draw the box "
+                      "snug around the object and try again.")
                 return 1
             mask, minor_deg, pts = out
             # the jaws closed across the object: its narrow direction NOW is the jaws' direction
