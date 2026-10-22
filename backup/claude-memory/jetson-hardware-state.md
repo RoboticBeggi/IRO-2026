@@ -38,3 +38,5 @@ Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname 
 
 **Why:** a previous SSD death wiped the user's whole project, so recoverability matters most.
 **How to apply:** everything is run via the `iro` command (tools/iro); keep state in the repo; see [[backup-failsafe]].
+
+**Reach (measured by hand 22 Oct, `iro arm reach` -> config/reach.yaml):** straight down only ~26 cm out at 15 cm up; leaning the gripper outward reaches ~39-40 cm at the floor (lean 37-59 deg), ~45 cm at 10 cm up. Picking plans the least lean that works (grasp.plan_reach). Only 6 servos on the bus (IDs 1-6). pyflakes is NOT in the iro venv: lint with /usr/bin/python3 -m pyflakes.

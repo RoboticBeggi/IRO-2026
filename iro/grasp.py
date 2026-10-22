@@ -16,7 +16,8 @@ How it works (calibration-free visual servoing, as `iro pick`):
   centring: two small test moves measure how the picture moves with the arm (image Jacobian), then
     the arm steps sideways until the object sits on the grasp pixel
   turning: the object's outline (MobileSAM) gives its narrow direction; the wrist roll turns the
-    jaws across it (the sign is checked by looking again, and remembered)
+    jaws across it while the camera ORBITS around the object (it sits 12 cm off the roll axis, so
+    turning in place swings the view away); the sign is checked by looking again, and remembered
   grasping: open to the object's width + 15 mm (iro measure gripper), straight down, close until
     FIRST CONTACT (iro measure close_on), check the width is plausible, lift, check it is still held
 Every run is recorded (iro review): a picture per step, the grip log, the decisions.
@@ -143,10 +144,52 @@ class DownEye:
         self.cam.release()
 
 
-def look(arm, xy, roll, h=LOOK_H, duration=None):
+def look(arm, xy, roll, h=LOOK_H, duration=None, tilt=0.0):
     from iro.pick import pick_config
     table = pick_config()["table_z"]
-    return arm.move_tip([xy[0], xy[1], table + h], roll=roll, duration=duration)
+    return arm.move_tip([xy[0], xy[1], table + h], roll=roll, duration=duration, tilt=tilt)
+
+
+OVER_H = (LOOK_H, 0.13, 0.11, 0.10)    # m: heights to come in over the object from (a standing tape is 7.6 cm)
+
+
+def max_lean_deg():
+    """The most the gripper leaned outward near the floor when you moved it by hand (iro arm reach)."""
+    from iro.reach import REACH
+    if not REACH.exists():
+        return 45.0
+    b = [x for x in yaml.safe_load(REACH.read_text())["bands"] if x["height_cm"][0] < 6]
+    return float(max([x["far_lean_deg"] for x in b] + [0.0])) or 45.0
+
+
+def plan_reach(arm, xy, roll, h_grasp, step_deg=5, quick=False):
+    """(over height, tilt rad) for coming down on floor point xy, or None if out of reach.
+    Straight down reaches ~27 cm out at 15 cm up; leaning outward reaches ~40 cm at the floor
+    (measured by hand, 22 Oct: config/reach.yaml). Least lean first: leaning tilts the jaws, which
+    can brush a tall object. One tilt for the whole way down, so the jaws do not swing near it."""
+    from iro.motion import SEEDS
+    from iro.pick import pick_config
+    table = pick_config()["table_z"]
+
+    def ok(h, tilt):
+        for s in [arm.joints()] + [np.array(x) for x in SEEDS]:
+            s = np.array(s, float)
+            s[4] = roll
+            if arm.kin.ik_down([xy[0], xy[1], table + h], s, tilt=tilt)[1] < 0.003:
+                return True
+        return False
+
+    degs = range(0, int(max_lean_deg()) + 1, step_deg)
+    if quick:                                      # reachable at all? (the full search takes ~10 s far out)
+        degs = [0, 30, int(max_lean_deg())]
+    for deg in degs:
+        t = -np.radians(deg)                       # ik_down: negative = leaning outward
+        if not ok(h_grasp, t) or not ok(0.10, t):
+            continue
+        for h in OVER_H:
+            if ok(h, t):
+                return h, t
+    return None
 
 
 def heading(arm):
@@ -157,6 +200,28 @@ def heading(arm):
 
 def rot(a):
     return np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+
+
+def orbit_xy(arm, P, roll, off, h=LOOK_H, iters=20):
+    """Where to look from so the floor point P sits on the grasp pixel with the wrist at `roll`.
+    The camera is 12 cm off the roll axis: turning the wrist in place swings the view in a circle
+    (22 Oct 16:28: the tape ended up 290 px away and was "lost"). So the camera orbits around P
+    instead: look point = P + offset turned by the gripper's heading AT that pose (solved by IK
+    without moving; the pan angle changes with the look point, hence a few iterations)."""
+    from iro.pick import pick_config
+    table = pick_config()["table_z"]
+    seed = arm.joints()
+    seed[4] = roll
+    xy = np.asarray(P, float) + rot(heading(arm)) @ off
+    for _ in range(iters):
+        q, _ = arm.kin.ik_down([xy[0], xy[1], table + h], seed)
+        x = arm.kin.fk(q, "gripper_link")[:3, 0]
+        new = np.asarray(P, float) + rot(np.arctan2(x[1], x[0])) @ off
+        if np.linalg.norm(new - xy) < 2e-4:
+            return new
+        xy = 0.5 * (xy + new)                  # damped: undamped it oscillated (17 mm off at +30 deg)
+        seed = q
+    return xy
 
 
 def floor_jacobian(arm, eye, xy, roll, step=0.02):
@@ -322,7 +387,7 @@ def log_pose(arm, r, stage, **extra):
     r.log("poses", stage=stage, q_deg=np.round(np.degrees(q), 2).tolist(), tip_m=np.round(tip, 4).tolist(), **extra)
 
 
-def descend(arm, xy, roll, h_to, r, step=0.01, block_mm=8):
+def descend(arm, xy, roll, h_to, r, step=0.01, block_mm=8, tilt=0.0):
     """Straight down in 1 cm steps, feeling for a blockage: if the tip stays more than block_mm
     above where it was sent, a jaw has landed on something (22 Oct: a standing tape was knocked
     over). Returns True when it reached h_to; False = blocked (it backs up 3 cm)."""
@@ -330,11 +395,11 @@ def descend(arm, xy, roll, h_to, r, step=0.01, block_mm=8):
     table = pick_config()["table_z"]
     z_now = arm.tip()[2] - table
     for h in np.arange(z_now - step, h_to - 1e-4, -step).tolist() + [h_to]:
-        look(arm, xy, roll, h=max(h, h_to), duration=0.4)
+        look(arm, xy, roll, h=max(h, h_to), duration=0.4, tilt=tilt)
         got = arm.tip()[2] - table
         if got - max(h, h_to) > block_mm / 1000:
             r.note(f"blocked at {got * 100:.1f} cm (sent {max(h, h_to) * 100:.1f} cm)")
-            look(arm, xy, roll, h=got + 0.03, duration=0.8)
+            look(arm, xy, roll, h=got + 0.03, duration=0.8, tilt=tilt)
             return False
     return True
 
@@ -397,27 +462,49 @@ def cmd_pick(name, drop=False, attempts=3):
                 xy, f, box, c = centre(arm, eye, xy, roll, J, target, c)
                 eye.show(f, "2. centred", box, target, tag + "2_centred")
                 log_pose(arm, r, "centred", attempt=attempt)
+                P0 = xy - rot(heading(arm)) @ off
+                if plan_reach(arm, P0, roll, G["grasp_h_m"], quick=True) is None:
+                    dist = np.linalg.norm(P0) * 100
+                    eye.show(f, f"{dist:.0f} cm out: out of reach", box, target, tag + "2_toofar")
+                    print(f"2. It is {dist:.0f} cm from the base: too far even leaning the gripper "
+                          f"{max_lean_deg():.0f} deg (iro arm reach). Move it closer (under ~35 cm) and run again.")
+                    r.note(f"out of reach at {np.round(P0, 3).tolist()}")
+                    return 1
                 # 3. turn the jaws across its narrow side
                 out = eye.outline(f, box)
                 if out is not None:
                     d = wrap90(out[1] - G["jaw_axis_deg"])
                     if abs(d) > 8:
+                        P = xy - rot(heading(arm)) @ off        # the object's floor point: fixed while turning
                         sign = G.get("roll_sign", 1)
-                        roll2 = roll + sign * np.radians(d)
-                        look(arm, xy, roll2)
-                        f, box, c, _ = eye.find(near=c, radius=200)
+
+                        def turn(s):
+                            r2 = roll + s * np.radians(d)
+                            xy2 = orbit_xy(arm, P, r2, off)
+                            look(arm, xy2, r2)
+                            got_ = eye.find(near=target, radius=200)
+                            r.note(f"turned {s * d:+.0f} deg: look ({xy2[0]:.3f}, {xy2[1]:.3f}), "
+                                   f"{'seen' if got_[1] is not None else 'NOT seen'}")
+                            return r2, xy2, got_
+
+                        roll2, xy2, (f, box, c, _) = turn(sign)
                         out2 = eye.outline(f, box) if box is not None else None
-                        d2 = wrap90(out2[1] - G["jaw_axis_deg"]) if out2 else d
-                        if abs(d2) > abs(d) * 0.7:              # turned the wrong way: flip, remember
-                            sign = -sign
-                            roll2 = roll + sign * np.radians(d)
-                            look(arm, xy, roll2)
-                            G["roll_sign"] = sign
-                            gf.write_text(yaml.safe_dump(G))
-                            r.note(f"wrist roll sign flipped to {sign}")
-                            f, box, c, _ = eye.find(near=c, radius=200)
-                        roll = roll2
+                        d2 = wrap90(out2[1] - G["jaw_axis_deg"]) if out2 else None
+                        if d2 is None or abs(d2) > abs(d) * 0.7:   # turned the wrong way (or unsure): try the other
+                            roll3, xy3, got3 = turn(-sign)
+                            out3 = eye.outline(got3[0], got3[1]) if got3[1] is not None else None
+                            d3 = wrap90(out3[1] - G["jaw_axis_deg"]) if out3 else None
+                            if d3 is not None and (d2 is None or abs(d3) < abs(d2)):
+                                sign = -sign
+                                roll2, xy2, (f, box, c, _) = roll3, xy3, got3
+                                G["roll_sign"] = sign
+                                gf.write_text(yaml.safe_dump(G))
+                                r.note(f"wrist roll sign flipped to {sign} (left {abs(d3):.0f} deg vs {abs(d2 or 90):.0f})")
+                            elif d2 is not None:
+                                roll2, xy2, (f, box, c, _) = turn(sign)    # the first way was the better one
+                        roll, xy = roll2, xy2
                         if box is None:
+                            eye.show(f, "3. lost it after turning", tag=tag + "3_lost")
                             raise RuntimeError("lost the object while turning the jaws")
                         J = floor_jacobian(arm, eye, xy, roll)      # the picture is turned now
                         xy, f, box, c = centre(arm, eye, xy, roll, J, target, c)
@@ -440,16 +527,28 @@ def cmd_pick(name, drop=False, attempts=3):
                 look_xy = xy.copy()
                 # 5. over it (the camera looked from an offset), down feeling for blockages, close
                 gxy = look_xy - rot(heading(arm)) @ off
-                look(arm, gxy, roll, duration=1.5)
+                plan = plan_reach(arm, gxy, roll, G["grasp_h_m"])
+                if plan is None:
+                    print(f"5. Over it is {np.linalg.norm(gxy) * 100:.0f} cm out: out of reach. Move it closer.")
+                    r.note(f"grasp point out of reach {np.round(gxy, 3).tolist()}")
+                    return 1
+                over_h, tilt = plan
+                if tilt:
+                    print(f"   leaning the gripper {np.degrees(-tilt):.0f} deg outward to reach it "
+                          f"({np.linalg.norm(gxy) * 100:.0f} cm out)")
+                r.note(f"over at {over_h * 100:.0f} cm, lean {np.degrees(-tilt):.0f} deg")
+                look(arm, gxy, roll, h=over_h, duration=1.5, tilt=tilt)
                 log_pose(arm, r, "over", attempt=attempt, grasp_xy=np.round(gxy, 4).tolist())
-                reached = descend(arm, gxy, roll, G["grasp_h_m"], r)
+                reached = descend(arm, gxy, roll, G["grasp_h_m"], r, tilt=tilt)
                 grip = close_on(arm, open_pct, r, hold=True) if reached else None
                 log_pose(arm, r, "closed" if grip else ("blocked" if not reached else "missed"), attempt=attempt)
                 if grip is None:
                     set_gripper(arm, open_pct)
                     why = "a jaw landed on it (stopped before pushing it over)" if not reached else "closed on nothing"
                     print(f"5. Missed: {why}.")
+                    # straight up first (a sideways move this low sweeps the jaws through it), then
                     # look again from where we looked before: did it move?
+                    look(arm, gxy, roll, h=over_h, duration=1.5, tilt=tilt)
                     look(arm, look_xy, level, duration=1.5)
                     f2, box2, c2, _ = eye.find()
                     if box2 is None:
@@ -466,7 +565,7 @@ def cmd_pick(name, drop=False, attempts=3):
                 if abs(grip["width_mm"] - w) > 20:
                     print("   (that width does not match: it may be holding it by a corner)")
                 # 6. lift and check it is still held
-                look(arm, gxy, roll, h=0.10, duration=2.0)
+                look(arm, gxy, roll, h=0.10, duration=2.0, tilt=tilt)
                 time.sleep(0.3)
                 c_ = arm.cal["gripper"]
                 now = 100 * (arm.bus.read("Present_Position", "gripper", normalize=False) - c_["range_min"]) / (
@@ -481,9 +580,9 @@ def cmd_pick(name, drop=False, attempts=3):
                 print(f"6. Holding the {name}, 10 cm up (try {attempt}).")
                 r.note(f"picked on try {attempt}: width {grip['width_mm']:.1f} mm at ({gxy[0]:.3f}, {gxy[1]:.3f})")
                 if drop:
-                    look(arm, gxy, roll, h=G["grasp_h_m"] + 0.005, duration=2.0)
+                    look(arm, gxy, roll, h=G["grasp_h_m"] + 0.005, duration=2.0, tilt=tilt)
                     set_gripper(arm, open_pct)
-                    look(arm, gxy, roll, duration=2.0)
+                    look(arm, gxy, roll, h=over_h, duration=2.0, tilt=tilt)
                     print("   Put it back down.")
                 return 0
             print(f"Gave up after {attempts} tries. Recording: {r.dir} (iro review)")

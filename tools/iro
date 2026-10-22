@@ -32,6 +32,7 @@ ARM (SO-ARM101)
   iro arm check           which way each joint counts (move each one by hand)
   iro arm align           RViz mirror + live corrections until the model matches the real arm
   iro arm zero            fine-tune each joint's zero error by touching the table ~8 times
+  iro arm reach           measure the real reach by moving the limp arm by hand (config/reach.yaml)
   iro arm off             torque off on all servos (HOLD THE ARM, it goes limp)
   iro pick [object]       find an object with YOLO and pick it up (--dry-run, --drop)
   iro pick look           go to the look pose, show what YOLO sees
@@ -102,13 +103,14 @@ case "$cmd" in
             zero) exec python -m iro.zerocal "$@" ;;
             align) ros_env; exec python -m iro.align ;;
             calibrate) exec python -m iro.calibrate ;;
+            reach) exec python -m iro.reach "$@" ;;
             off)
                 read -r -p "Torque OFF: the arm will go limp. Holding it? [y/N] " a
                 [ "$a" = y ] && exec python -c "
 from iro import load_config; from iro.hw.servos import open_bus
 d=load_config()['devices']['arm']
 with open_bus(d['port'], d['servo_ids']) as b: b.disable_torque(); print('torque off')" ;;
-            *) die "unknown: iro arm $sub (scan | calibrate | check | align | zero | off)" ;;
+            *) die "unknown: iro arm $sub (scan | calibrate | check | align | zero | reach | off)" ;;
         esac ;;
 
     lidar)
