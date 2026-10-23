@@ -1,0 +1,10 @@
+lidar_safe_joints_deg:
+- -3.7
+- -98.0
+- 94.8
+- 55.2
+- -83.7
+lidar_safe_blocked_deg: 0.0
+mic_sign: -1
+mic_offset_deg: 29.5
+mic_cal_median_err_deg: 21.3
