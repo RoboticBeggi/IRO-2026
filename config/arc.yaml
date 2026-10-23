@@ -2,10 +2,14 @@
 model: sealion-e2b          # chosen by `iro arc eval` (23 Oct: benchmark pending)
 topic: heritage
 model_dir: ~/llm-models
+wiki: true                  # look things up in offline Wikipedia (~/wiki/*.zim, iro/wiki.py)
+embedder:
+  file: embeddinggemma-300M-Q8_0.gguf
+  url: https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf
 server:
   binary: ~/llama.cpp/build/bin/llama-server
   port: 8090
-  ctx: 8192
+  ctx: 12288                # split over 2 slots: ARC's answers + wiki keywords
 models:
   sealion-e2b:
     file: Gemma-SEA-LION-v4.5-E2B-IT-Q4_K_M.gguf

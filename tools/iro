@@ -27,6 +27,9 @@ HEALTH
   iro doctor arm          only one group: jetson | devices | arm | backup
 
 ARM (SO-ARM101)
+  iro visitors            lidar + mic array: who is there, approaching, engaged, speaking (live radar)
+  iro visitors arm|learn|mic-cal   lidar-safe arm pose / learn the empty room / align mic to lidar
+  iro mic                 the mic array's voice direction, live
   iro arc chat            talk to ARC, the robot's offline language model (BM / EN / DE)
   iro arc eval            compare the language models: speed, language, facts, honesty
   iro arc topic NAME      switch the sub-topic (arc/topics/NAME.yaml)
@@ -96,6 +99,8 @@ cmd="${1:-help}"; shift || true
 case "$cmd" in
     help|-h|--help) usage ;;
 
+    visitors) ros_env; exec python -m iro.visitors "$@" ;;
+    mic) exec python -m iro.mic "$@" ;;
     arc) exec python -m iro.arc "$@" ;;
     doctor) exec python -m iro.doctor "$@" ;;
 

@@ -18,4 +18,5 @@ actions:
   greet: wave hello to a visitor (use when someone says hello or at the start)
   bow: a respectful bow (use when thanked or saying goodbye)
   perform: perform a short wayang kulit puppet movement with the arm (use when asked to show or perform)
-  look: look closely at the object in front of you with the wrist camera and recognise it (use when asked what an object is)
+  look: look at the object in front of you with the wrist camera and recognise it (use when asked what an object is; say only a few words first, you will be told what you saw)
+  show: pick an object up and show it (use when asked to show or pick up an object; say only a few words first, you will be told if it worked)

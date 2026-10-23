@@ -16,3 +16,7 @@ polars>=0.20
 ultralytics-thop>=2.2.3
 nvidia-ml-py>=12.0
 requests>=2.23
+# Offline Wikipedia for ARC (Kiwix ZIM files: full-text search + articles)
+libzim==3.13.1
+# reSpeaker XVF3800 control (direction of arrival, LED ring): iro/mic.py
+pyusb==1.3.1
