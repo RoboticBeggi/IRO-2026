@@ -76,7 +76,7 @@ limits:
     ram_free_fail_mb: 400
     disk_free_warn_gb: 20
     disk_free_fail_gb: 5
-    power_mode: MAXN_SUPER
+    power_mode: 25W             # 23 Oct: MAXN_SUPER throttled 13x per 38 s of LLM load (oc3 power spikes), 25W 1x for -5% speed (tools/power_test.sh)
   servos:                       # STS3215, 12 V version
     volt_warn: 11.0
     volt_fail: 10.0

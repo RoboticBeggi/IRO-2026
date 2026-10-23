@@ -308,6 +308,7 @@ class Visitors:
         c = cfg()
         self.mic_sign = c.get("mic_sign", 1)
         self.mic_offset = c.get("mic_offset_deg", 0.0)
+        self.mic_source = c.get("mic_source", "speaker")
         self.tracks = []
         self.events = []
         self.voice = None                          # last speech bearing in the lidar frame
@@ -348,8 +349,9 @@ class Visitors:
         self.tracks = keep
         # voice -> person
         self.voice = None
-        if mic and mic.get("speaker_deg") is not None:
-            self.voice = self.mic_to_lidar(mic["speaker_deg"])
+        deg = (mic.get("dirs") or {}).get(self.mic_source) if mic else None
+        if deg is not None:
+            self.voice = self.mic_to_lidar(deg)
             best = min((tr for tr in self.tracks if tr.id),
                        key=lambda tr: abs((tr.bearing - self.voice + 180) % 360 - 180), default=None)
             if best and abs((best.bearing - self.voice + 180) % 360 - 180) < 25:
@@ -559,44 +561,70 @@ def to_lidar_safe(arm):
     arm.move_joints(np.radians(q), duration=2.5)
 
 
-def cmd_mic_cal(seconds=40):
-    """Talk continuously while walking slowly around the robot (alone, 1-3 m away). Pairs of
-    (lidar bearing of the only visitor, mic speaker angle) give the mic's rotation and direction."""
+def fit_mic(pairs):
+    """(sign, offset_deg, median_err, p90_err) mapping mic angles to lidar bearings: circular mean
+    of the difference for both turning directions, then again without the worst 20 %."""
+    L, M = np.radians(np.array(pairs)).T
+    best = None
+    for sign in (1, -1):
+        d = L - sign * M
+        off = math.atan2(np.sin(d).mean(), np.cos(d).mean())
+        for _ in range(2):                         # refit on the best 80 % (stale or reflected readings)
+            res = np.abs((d - off + np.pi) % (2 * np.pi) - np.pi)
+            keep = res <= np.percentile(res, 80)
+            off = math.atan2(np.sin(d[keep]).mean(), np.cos(d[keep]).mean())
+        res = np.degrees(np.abs((d - off + np.pi) % (2 * np.pi) - np.pi))
+        cand = (sign, math.degrees(off), float(np.median(res)), float(np.percentile(res, 90)))
+        if best is None or cand[2] < best[2]:
+            best = cand
+    return best
+
+
+def cmd_mic_cal(seconds=60):
+    """Talk continuously while walking slowly ALL the way round the robot (alone, 1-3 m away). Pairs of
+    (lidar bearing of the only visitor, each mic direction reading) give the mic's rotation and
+    direction, and which reading follows a person best."""
     from iro.record import run
     r = run("visitors-mic-cal")
     input(f"Mic calibration: be the ONLY person near the robot. After Enter, talk (count, read aloud) while "
-          f"walking slowly all the way round it, 1-3 m away, for {seconds} s. ")
+          f"walking slowly ALL the way round it (a full circle), 1-3 m away, for {seconds} s. ")
     vis, lidar, mic = Visitors(), Lidar(), MicThread()
-    pairs, n, t0 = [], None, time.time()
+    pairs = {"speaker": [], "doa": [], "free": []}
+    n, t0 = None, time.time()
     try:
         while time.time() - t0 < seconds:
             n, (t, a, rr) = lidar.read(n)
             vis.step(t, a, rr)
             m = mic.mic_at(t)
             v = vis.visitors()
-            if m and m["speaker_deg"] is not None and len(v) == 1:
-                pairs.append((v[0].bearing, m["speaker_deg"]))
-                r.log("pairs", lidar_deg=round(v[0].bearing, 1), mic_deg=round(m["speaker_deg"], 1))
-            print(f"\r  {len(pairs)} pairs, {len(v)} visitor(s) seen   ", end="", flush=True)
+            if m and len(v) == 1:
+                for k, deg in (m.get("dirs") or {}).items():
+                    if deg is not None:
+                        pairs[k].append((v[0].bearing, deg))
+                r.log("pairs", lidar_deg=round(v[0].bearing, 1),
+                      **{k: (round(x, 1) if x is not None else "") for k, x in (m.get("dirs") or {}).items()})
+            cover = np.ptp([p[0] for p in pairs["doa"] or pairs["speaker"] or [(0, 0)]])
+            print(f"\r  {max(len(x) for x in pairs.values())} moments, circle covered ~{cover:.0f} deg, "
+                  f"{len(v)} visitor(s) seen   ", end="", flush=True)
     finally:
         lidar.close()
         mic.close()
-    if len(pairs) < 20:
-        print(f"\nOnly {len(pairs)} usable moments (need 20): talk louder / stay alone in view, then try again.")
+    fits = {k: fit_mic(p) for k, p in pairs.items() if len(p) >= 20}
+    if not fits:
+        print("\nToo few usable moments (need 20): talk louder / stay alone in view, then try again.")
         return 1
-    L, M = np.radians(np.array(pairs)).T
-    best = None
-    for sign in (1, -1):                           # circular mean of the difference, for both directions
-        d = L - sign * M
-        off = math.atan2(np.sin(d).mean(), np.cos(d).mean())
-        res = np.degrees(np.abs((d - off + np.pi) % (2 * np.pi) - np.pi))
-        if best is None or np.median(res) < best[2]:
-            best = (sign, math.degrees(off), float(np.median(res)), float(np.percentile(res, 90)))
-    sign, off, med_err, p90 = best
-    save_cfg(mic_sign=sign, mic_offset_deg=round(off, 1), mic_cal_median_err_deg=round(med_err, 1))
-    r.note(f"mic cal: sign {sign}, offset {off:.1f} deg, median error {med_err:.1f}, 90% {p90:.1f} ({len(pairs)} pairs)")
-    print(f"\nMic aligned to the lidar: angle = {sign:+d} x mic {off:+.1f} deg; typical error {med_err:.0f} deg "
+    for k, f in fits.items():
+        print(f"\n  {k:8s} {len(pairs[k]):3d} moments: typical error {f[2]:4.0f} deg, 90% within {f[3]:4.0f}")
+        r.note(f"mic cal {k}: sign {f[0]}, offset {f[1]:.1f}, median {f[2]:.1f}, p90 {f[3]:.1f}, n {len(pairs[k])}")
+    src = min(fits, key=lambda k: fits[k][2])
+    sign, off, med_err, p90 = fits[src]
+    bear = [p[0] for p in pairs[src]]
+    cover = float(np.ptp(bear))
+    save_cfg(mic_source=src, mic_sign=sign, mic_offset_deg=round(off, 1), mic_cal_median_err_deg=round(med_err, 1))
+    print(f"\nUsing the '{src}' reading: angle = {sign:+d} x mic {off:+.1f} deg; typical error {med_err:.0f} deg "
           f"(90% within {p90:.0f}). Saved {CFG.relative_to(ROOT)}.")
+    if cover < 270:
+        print(f"  Only ~{cover:.0f} deg of the circle was covered: run it again walking all the way round.")
     return 0
 
 

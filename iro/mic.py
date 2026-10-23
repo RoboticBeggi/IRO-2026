@@ -68,16 +68,25 @@ class MicArray:
         return None
 
     def sample(self):
-        """{t, doa_deg, speech, speaker_deg (None if nobody speaks), energy} or None."""
+        """{t, doa_deg, speech, speaker_deg (None if nobody speaks), energy, dirs} or None.
+        dirs: the three direction readings (deg, None when not speaking): speaker (processed),
+        doa (DOA_VALUE while speech is detected), free (free-running beam)."""
         doa = self.read("DOA_VALUE", lambda v: v[0] < 360 and v[1] in (0, 1))
         sel = self.read("SELECTED_AZIMUTHS",
                         lambda v: all(math.isnan(x) or 0 <= x <= 2 * math.pi + 1e-3 for x in v))
         en = self.read("AEC_SPENERGY_VALUES", lambda v: all(0 <= x < 1e9 for x in v))
+        az = self.read("AEC_AZIMUTH_VALUES", lambda v: all(math.isnan(x) or 0 <= x <= 2 * math.pi + 1e-3 for x in v))
         if doa is None:
             return None
         spk = None if sel is None or math.isnan(sel[0]) else math.degrees(sel[0]) % 360
+        # three direction readings; `iro visitors mic-cal` measures which follows a person best
+        # (23 Oct: the processed one held 346.7 deg for 5 s while the person walked 80 deg)
+        free = None
+        if az is not None and en is not None and en[2] > 0 and not math.isnan(az[2]):
+            free = math.degrees(az[2]) % 360          # the free-running beam: follows the loudest voice
         return {"t": time.time(), "doa_deg": float(doa[0]), "speech": bool(doa[1]),
-                "speaker_deg": spk, "energy": float(max(en[:2])) if en else 0.0}
+                "speaker_deg": spk, "energy": float(max(en[:2])) if en else 0.0,
+                "dirs": {"speaker": spk, "doa": float(doa[0]) if doa[1] else None, "free": free}}
 
     def led_doa(self):
         """LED ring points to the voice (judges can see it hear)."""

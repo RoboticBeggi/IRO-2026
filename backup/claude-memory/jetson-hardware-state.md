@@ -40,3 +40,5 @@ Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname 
 **How to apply:** everything is run via the `iro` command (tools/iro); keep state in the repo; see [[backup-failsafe]].
 
 **Reach (measured by hand 22 Oct, `iro arm reach` -> config/reach.yaml):** straight down only ~26 cm out at 15 cm up; leaning the gripper outward reaches ~39-40 cm at the floor (lean 37-59 deg), ~45 cm at 10 cm up. Picking plans the least lean that works (grasp.plan_reach). Only 6 servos on the bus (IDs 1-6). pyflakes is NOT in the iro venv: lint with /usr/bin/python3 -m pyflakes.
+
+**Throttling (23 Oct, SOLVED: now 25W mode):** 25W gave 1 oc3 event vs 13 at MAXN_SUPER, pp 1044 / tg 26.7 tok/s (-5%). config limits.jetson.power_mode = 25W. Original finding: the "power limit" warnings are soctherm **oc3 = VDD_IN instantaneous power** (load spikes from GPU bursts: LLM, vision), NOT the adapter: oc1 (under-voltage) = 0, VDD_IN steady 4.99 V. MAXN_SUPER: 13 oc3 events in 38 s of llama-bench (pp 1100, tg 28 tok/s). Compare modes with tools/power_test.sh (25W = `sudo nvpmodel -m 1`: GPU 918 MHz, CPU 1.34 GHz, same EMC). Clocks are dynamic (no jetson_clocks).

@@ -31,12 +31,25 @@ def power(cfg):
         return Result(G, "power supply", FAIL, f"input {mv / 1000:.2f} V is too low ({watts:.1f} W draw)",
                       "Underpowered: use the original 19 V Jetson adapter or a stronger battery regulator; "
                       "check the barrel plug is fully in.", data)
+    # oc1 = input under-voltage (the SUPPLY sags); oc2 = average input power; oc3 = instantaneous
+    # input power (short LOAD spikes, e.g. the GPU bursting for the LLM; too brief for the INA3221
+    # to show). NVIDIA forum mapping for the Orin Nano; measured 23 Oct: oc3 only, supply steady 4.99 V.
+    if events.get("oc1"):
+        return Result(G, "power supply", WARN,
+                      f"input voltage dipped {events['oc1']} time(s) since boot; now {mv / 1000:.2f} V, {watts:.1f} W",
+                      "The SUPPLY sags under load: use the original 19 V Jetson adapter (or a stronger battery "
+                      "regulator) and check the barrel plug.", data)
+    if total and total < 50 and not new:            # a few spikes are normal in 25W mode (1 per minute of LLM)
+        return Result(G, "power supply", INFO,
+                      f"{mv / 1000:.2f} V, {watts:.1f} W; {total} brief power-spike throttle(s) since boot (normal)",
+                      data=data)
     if total:
         return Result(G, "power supply", WARN,
-                      f"Jetson hit its power limit {total} time(s) since boot"
-                      + (f" ({new} just now)" if new else "") + f"; now {watts:.1f} W",
-                      "It throttled to protect itself. Supply too weak for the load, or too much running at "
-                      "once (LLM + vision). Use the full-power adapter; lower load if it keeps rising.", data)
+                      f"power spikes throttled the Jetson {total} time(s) since boot"
+                      + (f" ({new} just now)" if new else "") + f"; supply fine ({mv / 1000:.2f} V, {watts:.1f} W)",
+                      "Not the adapter: short load spikes (GPU bursts for the LLM, vision) hit the module's "
+                      "instant power limit. Compare modes with tools/power_test.sh; 25W mode avoids most of "
+                      "them (sudo nvpmodel -m 1).", data)
     return Result(G, "power supply", OK, f"{mv / 1000:.2f} V, {watts:.1f} W, no power-limit events", data=data)
 
 
