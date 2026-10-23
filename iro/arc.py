@@ -3,6 +3,7 @@
     iro arc chat [--lang ms|en|de] [--robot]   talk to ARC by typing; --robot: skills really move the
                                      arm (default: simulated, safe to try anywhere)
     iro arc routine teach|play|list NAME   hand-taught arm movements (greet, bow, perform)
+    iro arc talk [--robot] [--en]    speak with ARC: mic array -> Whisper -> ARC -> its Qwen voice
     iro arc ask "question"           one question, one answer
     iro arc eval [MODEL ...]         run arc/eval.yaml on each model: speed, language, facts, honesty
     iro arc topic [NAME]             show / switch the sub-topic (arc/topics/NAME.yaml)
@@ -413,6 +414,9 @@ def main():
     if sub == "chat":
         lang = a[a.index("--lang") + 1] if "--lang" in a else None
         return cmd_chat(lang, robot="--robot" in a)
+    if sub == "talk":
+        from iro.talk import main as talk_main
+        return talk_main()
     if sub == "routine":
         from iro.skills import main as skills_main
         sys.argv = [sys.argv[0]] + a[1:]
