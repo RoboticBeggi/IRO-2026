@@ -6,7 +6,9 @@
 # A folder of voices as argument (default ~/voice-samples): tools/listen_voices.sh ~/voice-samples/gallery
 DIR=${1:-$HOME/voice-samples}
 play() {
-    if [ "${DEV:-}" = respeaker ]; then aplay -q -D plughw:CARD=Array,DEV=0 "$1"; else paplay "$1"; fi
+    # HDMI named explicitly: after a reboot the default went back to the empty analog port (23 Oct)
+    if [ "${DEV:-}" = respeaker ]; then aplay -q -D plughw:CARD=Array,DEV=0 "$1"
+    else paplay --device=alsa_output.platform-3510000.hda.hdmi-stereo "$1"; fi
 }
 for d in "$DIR"/*/; do
     [ "$(basename "$d")" = gallery ] && continue
