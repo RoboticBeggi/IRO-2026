@@ -276,7 +276,7 @@ class SideCam:
             self.oak.close()
 
 
-def holding(arm, grip, r, squeeze=12, slack_mm=9):
+def holding(arm, grip, r, squeeze=12):
     """Squeeze test: aim `squeeze` % further closed for a moment. Holding it, the jaws stay near the
     grip width; empty, they close ~18 mm further. (22 Oct: the old test, "did the jaws close
     further while lifting", said "holding" over a tape left on the floor: the carrying grip
@@ -289,8 +289,11 @@ def holding(arm, grip, r, squeeze=12, slack_mm=9):
         c["range_max"] - c["range_min"])
     arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, max(0.0, grip["touch_pct"] - HOLD_PCT)), normalize=False)
     mm = opening_mm(now)
-    r.note(f"squeeze test: jaws at {mm:.1f} mm (gripped at {grip['width_mm']:.1f})")
-    return mm >= grip["width_mm"] - slack_mm, mm
+    empty = opening_mm(max(0.0, grip["touch_pct"] - squeeze))     # where empty jaws would end up
+    # halfway between "held" and "empty": a held tape squeezed to 18-20 mm from 26-27 (3 picks,
+    # 22 Oct), empty ~5 mm; the first cut-off (grip - 9 mm) was only 1 mm from a real hold
+    r.note(f"squeeze test: jaws at {mm:.1f} mm (gripped at {grip['width_mm']:.1f}, empty would be {empty:.1f})")
+    return mm > (grip["width_mm"] + empty) / 2, mm
 
 
 # ------------------------------------------------------------------ teach
