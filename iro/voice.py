@@ -79,7 +79,16 @@ def seconds(wav):
         return w.getnframes() / w.getframerate()
 
 
+def unmute():
+    """Make sure the speaker output is on: replugging a USB audio device switched outputs and left
+    HDMI muted (23 Oct, "no audio")."""
+    out = cfg()["output"]
+    subprocess.run(["pactl", "set-sink-mute", out, "0"], check=False)
+    subprocess.run(["pactl", "set-sink-volume", out, "100%"], check=False)
+
+
 def play(wav):
+    unmute()
     subprocess.run(["paplay", f"--device={cfg()['output']}", str(wav)], check=False)
 
 

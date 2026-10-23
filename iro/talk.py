@@ -116,6 +116,8 @@ class Voice:
         c = cfg()
         self.voice = c["voice"] or "preset:ryan"
         self.sink = c["output"]
+        from iro.voice import unmute
+        unmute()
         model = c["customvoice"] if self.voice.startswith("preset:") else c["base"]
         self.url = f"http://127.0.0.1:{TTS_PORT}"
         if not get(self.url + "/health"):
