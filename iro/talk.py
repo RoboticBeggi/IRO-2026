@@ -34,6 +34,8 @@ WHISPER_PORT, TTS_PORT = 8092, 8093
 NAMES = "ARC, wayang kulit, Tok Dalang, Kelantan, songket, silat, tepak sirih, Mak Yong, Hanuman, Seri Rama."
 FIXES = {r"\bark\b": "ARC", r"\barc\b": "ARC", r"\bwayang kilit\b": "wayang kulit", r"\btok daling\b": "Tok Dalang"}
 RATE = 16000
+PHANTOM = re.compile(r"^\W*(thank you|thanks for watching|thank you for watching|you|bye|\.+|"
+                     r"subtitles by.*|terima kasih\.?)\W*$", re.I)
 LANGS = {"ms": "ms", "en": "en", "de": "de"}
 
 
@@ -90,6 +92,15 @@ def transcribe(pcm16):
     with urllib.request.urlopen(req, timeout=60) as r:
         d = json.load(r)
     text = (d.get("text") or "").strip()
+    segs = d.get("segments") or []
+    # Whisper invents text on noise ("Thank you.", "Thanks for watching!"): drop low-confidence results
+    nsp = float(np.mean([x.get("no_speech_prob", 0.0) for x in segs])) if segs else 0.0
+    lp = float(np.mean([x.get("avg_logprob", 0.0) for x in segs])) if segs else 0.0
+    if nsp > 0.6 or lp < -1.2:
+        return "", d.get("detected_language")
+    # "thank you" is real when a visitor says it: dropped only when Whisper doubts there was speech
+    if PHANTOM.match(text) and (nsp > 0.25 or lp < -0.8 or text.strip(" .") in ("you", "")):
+        return "", d.get("detected_language")
     for pat, rep in FIXES.items():
         text = re.sub(pat, rep, text, flags=re.I)
     return text, d.get("detected_language") or d.get("language")
@@ -172,40 +183,28 @@ def sentences(buf):
 # ------------------------------------------------------------------ hear (mic array)
 
 class Ears:
-    """Streams 16 kHz audio from the array; yields one utterance (int16 array) at a time."""
+    """The array's ASR channel through Silero VAD: yields one spoken sentence (int16) at a time.
+    (23 Oct: replaced a loudness threshold, which missed quiet voices and fired on clatter.)"""
 
     def __init__(self, mic=None):
+        from iro.speaker import Vad, stream
         self.mic = mic
-        self.proc = subprocess.Popen(["arecord", "-q", "-D", "plughw:CARD=Array,DEV=0", "-f", "S16_LE", "-r", str(RATE),
-                                      "-c", "1", "-t", "raw"], stdout=subprocess.PIPE)
+        self.proc = stream()                       # through PulseAudio (it holds the sound card)
+        self.vad = Vad()
 
-    def utterances(self, voice, start_rms=500, end_quiet=0.7, max_len=15.0):
-        frame = int(RATE * 0.03)
-        pre, cur, speaking, quiet, noise = [], [], False, 0.0, 200.0
+    def utterances(self, voice):
+        frame = 512                                # 32 ms, Silero's window
         while True:
             raw = self.proc.stdout.read(frame * 2)
             if not raw:
                 return
             a = np.frombuffer(raw, np.int16)
             if voice.speaking():                   # ARC is talking: do not listen to ourselves
-                pre, cur, speaking = [], [], False
+                self.vad.reset()
                 continue
-            rms = float(np.sqrt(np.mean(a.astype(np.float32) ** 2)))
-            flag = bool(self.mic.last and self.mic.last.get("speech")) if self.mic else False
-            loud = rms > max(start_rms, 3 * noise)
-            if not speaking:
-                noise = 0.98 * noise + 0.02 * rms
-                pre = (pre + [a])[-10:]            # 0.3 s before the start
-                if loud and (flag or rms > 2 * max(start_rms, 3 * noise)):
-                    speaking, cur, quiet = True, list(pre), 0.0
-            else:
-                cur.append(a)
-                quiet = 0.0 if (loud or flag) else quiet + 0.03
-                if quiet >= end_quiet or len(cur) * 0.03 > max_len:
-                    speaking = False
-                    u = np.concatenate(cur)
-                    if len(u) > RATE * 0.4:
-                        yield u
+            for seg in self.vad.feed(a):
+                if len(seg) > RATE * 0.4:
+                    yield seg
 
     def close(self):
         self.proc.terminate()
@@ -232,6 +231,12 @@ def main():
         mic = None
     body = Body(robot="--robot" in a)
     ears = Ears(mic)
+    from concurrent.futures import ThreadPoolExecutor
+    from iro.speaker import Owner
+    owner_id = Owner()
+    pool = ThreadPoolExecutor(1)
+    if not owner_id.ok:
+        print("(no owner voice yet: everyone is a visitor. Teach it yours: iro voice enroll)")
     hist = []
     greet = topic()["greeting"]["en"]
     print(f"ARC ({arc_cfg()['model']}, voice {voice.voice}). Speak to it. Ctrl+C to stop.\nARC: {greet}")
@@ -240,12 +245,14 @@ def main():
     try:
         for k, u in enumerate(ears.utterances(voice)):
             t0 = time.time()
+            who = pool.submit(owner_id.is_owner, u)        # voiceprint on the CPU while Whisper runs
             text, lang = transcribe(u)
+            is_owner, score = who.result()
             t_heard = time.time() - t0
             if not text or len(text) < 2 or text.startswith("["):
                 continue
             lang = "en" if english else LANGS.get(lang, "en")
-            print(f"\nyou ({lang}, {t_heard:.1f}s): {text}")
+            print(f"\n{'sir' if is_owner else 'visitor'} ({lang}, voice {score:.2f}, {t_heard:.1f}s): {text}")
             with wave.open(str(r.dir / f"heard_{k:03d}.wav"), "wb") as w:
                 w.setnchannels(1)
                 w.setsampwidth(2)
@@ -256,6 +263,7 @@ def main():
             t_think = time.time()
 
             def on_text(s):
+                s = re.sub(r"[*_#`]+|[\U0001F000-\U0001FAFF\u2600-\u27BF]", "", s)   # spoken: no markdown/emoji
                 print(s, end="", flush=True)
                 buf["text"] += s
                 done, buf["text"] = sentences(buf["text"])
@@ -263,14 +271,15 @@ def main():
                     voice.say(sent, lang_names.get(lang, "English"))
 
             print("ARC: ", end="", flush=True)
-            replies = respond(body, hist, text, lang, on_text=on_text)
+            replies = respond(body, hist, text, lang, on_text=on_text, owner=is_owner)
             if buf["text"].strip():
                 voice.say(buf["text"].strip(), lang_names.get(lang, "English"))
             while voice.first_audio is None and voice.speaking():
                 time.sleep(0.02)
             first = (voice.first_audio or time.time()) - t0
             print(f"\n     [heard in {t_heard:.1f}s, first word spoken {first:.1f}s after you stopped]")
-            r.log("talk", k=k, heard=text, lang=lang, t_transcribe=round(t_heard, 2),
+            r.log("talk", k=k, heard=text, lang=lang, owner=int(is_owner), voice_score=round(score, 3),
+                  t_transcribe=round(t_heard, 2),
                   t_first_audio=round(first, 2), t_think=round(time.time() - t_think, 2),
                   reply=" ".join(x["text"] for x in replies), act=replies[0].get("act") or "")
     except KeyboardInterrupt:

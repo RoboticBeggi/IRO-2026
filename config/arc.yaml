@@ -1,5 +1,5 @@
 # ARC's language model (iro arc). Models live outside the repo (too big for git): model_dir.
-model: sealion-e2b          # chosen by `iro arc eval` (23 Oct: benchmark pending)
+model: qwen35-2b            # 23 Oct: SEA-LION E2B needs 3.2 GB; Qwen3.5-2B 1.25 GB so hearing + voice fit (tools/mem_budget.sh); best facts 13/13
 topic: heritage
 model_dir: ~/llm-models
 wiki: true                  # look things up in offline Wikipedia (~/wiki/*.zim, iro/wiki.py)
@@ -9,7 +9,7 @@ embedder:
 server:
   binary: ~/llama.cpp/build/bin/llama-server
   port: 8090
-  ctx: 12288                # split over 2 slots: ARC's answers + wiki keywords
+  ctx: 8192                 # 2 slots x 4096 (ARC answers + wiki keywords); 12288 did not fit with voice
 models:
   sealion-e2b:
     file: Gemma-SEA-LION-v4.5-E2B-IT-Q4_K_M.gguf

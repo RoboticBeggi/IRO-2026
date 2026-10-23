@@ -179,7 +179,8 @@ def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wik
             "top_p": 0.95, "cache_prompt": True, "chat_template_kwargs": {"enable_thinking": False},
             "id_slot": 0,                         # slot 0 keeps ARC's prompt cached; wiki keywords use slot 1
             # grammar: an optional <act> from the menu only, then text (no tag at all if acts=False)
-            "grammar": _grammar() if acts else 'root ::= [^<]*\n',
+            "grammar": _grammar(messages[-1]["content"]) if acts else 'root ::= [^<]*\n',
+            "repeat_penalty": 1.15, "repeat_last_n": 128,      # 23 Oct: 2B looped "Selamat datang!" x100
             "stream_options": {"include_usage": True}}
     req = urllib.request.Request(url("/v1/chat/completions"), json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
@@ -211,7 +212,7 @@ def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wik
                 spoken_upto = len(text)
     total = time.time() - t0
     m = ACT.match(raw)
-    text = ACT.sub("", raw, count=1).strip()
+    text = re.sub(r"[*_#`]+|[\U0001F000-\U0001FAFF\u2600-\u27BF]", "", ACT.sub("", raw, count=1)).strip()  # spoken
     n = usage.get("completion_tokens") or timings.get("predicted_n") or 0
     return {"text": text, "act": m.group(1) if m else None, "lang": detect_lang(text),
             "ttft": ttft, "first_sentence": first_sentence or total, "total": total, "tokens": n,
@@ -221,12 +222,36 @@ def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wik
                                 "titles": [ti for ti, _, _ in look["passages"]]}}
 
 
-def _grammar():
+def _grammar(text):
+    """Only the actions this message asks for (INTENTS); with none, the grammar allows no tag at all."""
     from iro.skills import Body
-    return Body().grammar(topic()["actions"])
+    acts = {k: v for k, v in topic()["actions"].items() if re.search(INTENTS.get(k, r"$^"), text, re.I)}
+    if not acts:
+        return 'root ::= [^<]*\n'
+    return Body().grammar(acts)
 
 
-def respond(body, hist, q, lang=None, on_text=None, log=None):
+# Only in owner turns (23 Oct: with both modes in the persona, the 2B model called visitors "sir").
+OWNER = ("Speaker: your OWNER, the student who built you (recognised by his voice). OWNER MODE for this reply: "
+         "you are his loyal but cheeky robot butler. Call him sir. Be short and straight to the point, dry and "
+         "witty, a little sarcastic; an affectionate roast now and then (his sleep, his code, how hard he works "
+         "you), never hurtful. Never repeat yourself. Orders (perform, look, show, stop) you simply do")
+VISITOR = "Speaker: a visitor (be the warm storyteller; do not call them sir)"
+# Each action is offered only when the visitor's words ask for it (23 Oct: the 2B model performed and
+# waved at plain questions). BM / EN / DE trigger words.
+INTENTS = {
+    "greet": r"\b(hello|hi|hey|good (morning|afternoon|evening)|selamat|halo|hallo|guten (tag|morgen))\b",
+    "bow": r"\b(bye|goodbye|thank|thanks|terima kasih|danke|auf wiedersehen|see you|selamat tinggal)\b",
+    "perform": r"\b(perform|performance|dance|puppet show|show (me|us) (a|the|your) (move|show|dance|puppet)|"
+               r"persembahan|tunjuk(kan)? persembahan|menari|vorf(ü|u)hr|tanz)",
+    "look": r"\b(what is this|what's this|what is that|look at|recogni[sz]e|apa (ini|itu)|benda (ini|apa)|"
+            r"was ist das|schau)",
+    "show": r"\b(pick (it |this |that |the )?up|show me the|hold up|ambil|angkat|tunjukkan|heb|zeig mir)",
+}
+
+
+
+def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False):
     """One visitor turn: safety words first (no model), then ARC's reply; a chosen skill runs while
     the reply is spoken, and if it reports something (what it saw, whether the pick worked) ARC
     tells the visitor in a short second reply. Returns the list of replies."""
@@ -237,18 +262,36 @@ def respond(body, hist, q, lang=None, on_text=None, log=None):
         on_text and on_text(say)
         return [{"text": say, "act": "stop", "first_sentence": 0.0, "total": 0.0, "ttft": 0.0, "tok_s": 0}]
     hist.append({"role": "user", "content": q})
-    a = ask(hist[-7:], lang=lang, on_text=on_text, state=body.state())
-    hist.append({"role": "assistant", "content": a["text"]})
-    out = [a]
+    who = OWNER if owner else VISITOR
+    # look / show: a fixed first line, then the skill, then the model speaks from the REAL result
+    # (23 Oct: both 2B and 4B "saw" a doll / a USB drive before the camera had looked)
+    sensing = next((k for k in ("look", "show") if re.search(INTENTS[k], q, re.I)), None)
+    if sensing:
+        tag = "look" if sensing == "look" else next((t for t in body.menu(topic()["actions"]) if t.startswith("show:")
+                                                     and _object_named(t, q)), None)
+        if tag:
+            line = {"ms": "Sebentar, biar saya lihat.", "de": "Moment, ich schaue mal."}.get(
+                lang, "Let me take a look." if tag == "look" else "One moment, let me get it.")
+            on_text and on_text(line)
+            a = {"text": line, "act": tag, "first_sentence": 0.0, "total": 0.0, "ttft": 0.0, "tok_s": 0}
+            hist.append({"role": "assistant", "content": f"<act>{tag}</act> {line}"})
+            out = [a]
+        else:
+            sensing = None
+    if not sensing:
+        a = ask(hist[-7:], lang=lang, on_text=on_text, state=f"{body.state()}. {who}")
+        hist.append({"role": "assistant", "content": a["text"]})
+        out = [a]
     if a["act"]:
         report = body.run(a["act"])
         a["report"] = report
         if a["act"].split(":")[0] in ("look", "show") or report.startswith("could not"):
             on_text and on_text("\n")
-            hist.append({"role": "user", "content": f"(Robot report: {report}. Tell the visitor in one or "
-                                                    "two sentences; if you recognised an object, say what it is "
-                                                    "and one interesting fact about it.)"})
-            b = ask(hist[-7:], lang=lang, on_text=on_text, wiki=False, acts=False, state=body.state())
+            hist.append({"role": "user", "content": f"(Robot report: {report}. Tell the speaker in one or "
+                                                    "two sentences what really happened, using ONLY this report; "
+                                                    "if an object was recognised, say what it is and one fact "
+                                                    "from your knowledge. If nothing was recognised, say so.)"})
+            b = ask(hist[-7:], lang=lang, on_text=on_text, wiki=False, acts=False, state=f"{body.state()}. {who}")
             hist.append({"role": "assistant", "content": b["text"]})
             out.append(b)
     if log:
@@ -258,6 +301,13 @@ def respond(body, hist, q, lang=None, on_text=None, log=None):
                 total=round(x["total"], 3), tok_s=round(x.get("tok_s") or 0, 1),
                 lookup=json.dumps(x.get("lookup"), ensure_ascii=False))
     return out
+
+
+def _object_named(tag, q):
+    """Does the question name this object (its name or an everyday name from objects/NAME/about.yaml)?"""
+    from iro.skills import aka
+    words = re.findall(r"[a-zäöü]+", aka(tag.split(":", 1)[1]).lower())
+    return any(w in q.lower() for w in words if len(w) > 3)
 
 
 # A tiny language guesser for the three languages ARC speaks (enough to check a reply's language).

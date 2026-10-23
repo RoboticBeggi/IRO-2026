@@ -104,7 +104,9 @@ class Body:
         try:
             if not self.robot:
                 time.sleep(0.5)
-                return f"(simulated) did {tag}"
+                if name == "look":            # say so plainly, or the model invents what it "saw"
+                    return "test mode, the camera is not connected: nothing was seen"
+                return f"(test mode) pretended to do {tag}"
             if name in ("greet", "bow", "perform"):
                 play(name, self.stop_flag)
                 return f"did the {name} movement"

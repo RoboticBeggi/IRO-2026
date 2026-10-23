@@ -24,3 +24,6 @@ datasets/
 
 # Taught-object model: small, and slow to retrain, so it IS backed up
 !objects/model/*.pt
+
+# Owner voiceprint: personal biometric data, stays on the robot only (iro/speaker.py)
+config/owner_voice.npz

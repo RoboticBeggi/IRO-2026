@@ -8,6 +8,8 @@
     iro voice play NAME                hear it
     iro voice use NAME                 ARC speaks in this voice from now on
     iro voice say "text" [--voice NAME]   say anything in a voice (shows how long it took)
+    iro voice enroll                   teach ARC YOUR voice (it calls you sir; iro/speaker.py)
+    iro voice whoami                   check: owner or visitor?
 
 How a voice stays the same every time: a kept take becomes a reference clip (voices/NAME/ref.wav +
 its words). Qwen's Base model clones it for every sentence ("in-context" cloning with the speaker
@@ -172,6 +174,9 @@ def say(text, voice=None, out=None):
 def main():
     a = sys.argv[1:]
     sub = a[0] if a else "list"
+    if sub in ("enroll", "whoami"):
+        from iro.speaker import cmd_enroll, cmd_whoami
+        return cmd_enroll() if sub == "enroll" else cmd_whoami()
     if sub == "presets":
         return cmd_presets(a[1] if len(a) > 1 else None)
     if sub == "design" and len(a) >= 3:

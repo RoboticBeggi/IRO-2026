@@ -1,6 +1,7 @@
 """reSpeaker XVF3800 control over USB: where speech comes from, how strong it is, the LED ring.
 
     python -m iro.mic          print direction / speech / energy 5x a second (talk around it)
+    iro mic test               which output hears your voice best (levels, SNR, VAD, Whisper); saves it
 
 The array does the hard work on its own chip (beamforming, echo cancelling, noise suppression,
 direction of arrival). Over USB vendor control transfers (Seeed's xvf_host.py protocol) we read:
@@ -16,6 +17,8 @@ import math
 import struct
 import sys
 import time
+
+import numpy as np
 
 VID, PID = 0x2886, 0x001A
 # name: (resid, cmdid, count, struct format)
@@ -100,7 +103,50 @@ class MicArray:
         self.usb.util.dispose_resources(self.dev)
 
 
+def cmd_test(seconds=6):
+    """Which array output hears YOUR voice best? Records both channels while you talk, then compares
+    speech level, noise, signal-to-noise, Silero VAD speech time and Whisper's transcript; saves the
+    winner as mic_channel in config/voice.yaml (used by iro arc talk and iro voice enroll)."""
+    from iro.speaker import RATE, Vad, record
+    from iro.voice import save_cfg
+    input(f"Mic test: stand where visitors stand (~1 m). Enter, then talk normally for {seconds} s "
+          "(for example: describe your day). ")
+    both = record(seconds, both=True)
+    names = {0: "left (conference beam)", 1: "right (ASR beam)"}
+    results = {}
+    try:
+        from iro.talk import start_whisper, transcribe
+        start_whisper()
+    except Exception:                              # noqa: BLE001 - levels alone still help
+        transcribe = None
+    for ch in (0, 1):
+        a = both[:, ch].copy()
+        fr = a[: len(a) // 320 * 320].astype(np.float32).reshape(-1, 320)
+        r = np.sqrt((fr ** 2).mean(1))
+        noise, speech = np.percentile(r, 10), np.percentile(r, 90)
+        snr = 20 * np.log10(max(speech, 1) / max(noise, 1))
+        v = Vad()
+        segs = v.feed(a) + []
+        v.v.flush()
+        while not v.v.empty():
+            segs.append(np.asarray(v.v.front.samples))
+            v.v.pop()
+        talk_s = sum(len(x) for x in segs) / RATE
+        text = transcribe(a)[0] if transcribe else ""
+        results[ch] = (snr, talk_s)
+        print(f"  {names[ch]:24s} speech {speech:6.0f}  noise {noise:5.0f}  SNR {snr:4.1f} dB  "
+              f"speech found {talk_s:3.1f}s  heard: {text[:70]!r}")
+    best = max(results, key=lambda c: (results[c][1] > 1.0, results[c][0]))
+    save_cfg(mic_channel=int(best))
+    print(f"Using the {names[best]} from now on (config/voice.yaml mic_channel: {best}).")
+    if results[best][1] < 1.0:
+        print("  Hardly any speech was found: speak louder or closer, and check the red Mute LED is off.")
+    return 0
+
+
 def main():
+    if sys.argv[1:2] == ["test"]:
+        return cmd_test()
     m = MicArray()
     print("firmware", ".".join(map(str, m._read("VERSION"))))
     m.led_doa()
