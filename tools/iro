@@ -27,6 +27,9 @@ HEALTH
   iro doctor arm          only one group: jetson | devices | arm | backup
 
 ARM (SO-ARM101)
+  iro arc chat            talk to ARC, the robot's offline language model (BM / EN / DE)
+  iro arc eval            compare the language models: speed, language, facts, honesty
+  iro arc topic NAME      switch the sub-topic (arc/topics/NAME.yaml)
   iro arm scan            are all 6 servos there? temps, volts (read-only)
   iro arm calibrate       fresh LeRobot calibration, checked, then backed up
   iro arm check           which way each joint counts (move each one by hand)
@@ -93,6 +96,7 @@ cmd="${1:-help}"; shift || true
 case "$cmd" in
     help|-h|--help) usage ;;
 
+    arc) exec python -m iro.arc "$@" ;;
     doctor) exec python -m iro.doctor "$@" ;;
 
     arm)

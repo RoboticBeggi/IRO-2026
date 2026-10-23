@@ -1,0 +1,25 @@
+# ARC's language model (iro arc). Models live outside the repo (too big for git): model_dir.
+model: sealion-e2b          # chosen by `iro arc eval` (23 Oct: benchmark pending)
+topic: heritage
+model_dir: ~/llm-models
+server:
+  binary: ~/llama.cpp/build/bin/llama-server
+  port: 8090
+  ctx: 8192
+models:
+  sealion-e2b:
+    file: Gemma-SEA-LION-v4.5-E2B-IT-Q4_K_M.gguf
+    url: https://huggingface.co/aisingapore/Gemma-SEA-LION-v4.5-E2B-IT-GGUF/resolve/main/Gemma-SEA-LION-v4.5-E2B-IT-Q4_K_M.gguf
+    note: Gemma 4 E2B tuned by AI Singapore for SEA languages incl. Malay (May 2026)
+  gemma4-e2b:
+    file: gemma-4-E2B-it-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf
+    note: Google Gemma 4 E2B, the base of the one above (shows what the SEA tuning adds)
+  qwen35-4b:
+    file: Qwen3.5-4B-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf
+    note: Alibaba Qwen3.5 4B (Mar 2026), strongest reasoning at this size
+  qwen35-2b:
+    file: Qwen3.5-2B-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf
+    note: Alibaba Qwen3.5 2B, the fast fallback
