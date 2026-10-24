@@ -36,6 +36,24 @@ ARC = ROOT / "arc"
 CFG = ROOT / "config" / "arc.yaml"
 LANGS = {"ms": "Bahasa Melayu", "en": "English", "de": "German (Deutsch)"}
 ACT = re.compile(r"^\s*<act>\s*([A-Za-z_]+(?::[A-Za-z0-9_]+)?)\s*</act>\s*")
+MOODS = ("amused", "excited", "concerned")          # voices/<voice>-<mood>; no tag = calm (the main voice)
+MOOD = re.compile(r"^\s*<mood>\s*(" + "|".join(MOODS) + r")\s*</mood>\s*")
+MOOD_RULE = 'mood ::= "<mood>" (' + " | ".join(f'"{m}"' for m in MOODS) + ') "</mood> "\n'
+
+
+def split_tags(raw):
+    """(act, mood, spoken text, still_inside_a_tag) of a streamed reply that may start with
+    <act>..</act> and/or <mood>..</mood>."""
+    act = mood = None
+    rest = raw
+    m = ACT.match(rest)
+    if m:
+        act, rest = m.group(1), rest[m.end():]
+    m = MOOD.match(rest)
+    if m:
+        mood, rest = m.group(1), rest[m.end():]
+    pending = rest.lstrip().startswith("<") and len(rest) < 40
+    return act, mood, rest, pending
 
 
 def cfg():
@@ -57,6 +75,16 @@ def card(name):
 
 def topic(name=None):
     return yaml.safe_load((ARC / "topics" / f"{name or cfg()['topic']}.yaml").read_text())
+
+
+def card_topic(q):
+    """The knowledge card whose names the question mentions, or None."""
+    low = q.lower()
+    for c in topic()["cards"]:
+        meta, _ = card(c)
+        if any(n.lower() in low for n in meta.get("names", []) if len(n) > 3):
+            return c
+    return None
 
 
 def menu(name=None):
@@ -127,7 +155,7 @@ def start(model=None, quiet=False):
         if time.time() - t0 > 180:
             raise SystemExit("the model server did not start in 3 min: see /tmp/arc-server.log")
         time.sleep(0.5)
-    if c.get("wiki"):                             # the embedder too: starting it mid-question cost 5.8 s
+    if c.get("wiki") and (c.get("embedder") or {}).get("enabled", False):   # off: BM25 ranks (no memory)
         from iro.wiki import start_embedder
         start_embedder()
     if not quiet:
@@ -138,17 +166,17 @@ def start(model=None, quiet=False):
 # ------------------------------------------------------------------ asking
 
 def ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wiki=True, state=None,
-        acts=True, _retry=True):
+        acts=True, _retry=True, on_mood=None):
     """See _ask. If the model server died (23 Oct: it dropped a connection once during a long test),
     restart it and try once more: a silent robot in front of the judges is the worst outcome."""
     try:
-        return _ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts)
+        return _ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts, on_mood)
     except (ConnectionError, urllib.error.URLError, OSError) as e:
         if not _retry:
             raise
         print(f"\n(model server problem: {e}; restarting it)")
         start(running_key() or cfg()["model"], quiet=True)
-        return ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts, _retry=False)
+        return ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts, _retry=False, on_mood=on_mood)
 
 
 def running_key():
@@ -158,14 +186,16 @@ def running_key():
 
 
 def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wiki=True, state=None,
-         acts=True):
+         acts=True, on_mood=None):
     """Stream one reply. messages: chat history ending with the user's turn (system added here).
     Returns {text, act, lang, ttft, first_sentence, total, tokens, tok_s}. on_text(chunk) gets the
     spoken text as it streams (the action tag is removed first)."""
     t0 = time.time()                              # timings include the lookup: the visitor waits for both
     msgs = [{"role": "system", "content": system_prompt()}] + [dict(m) for m in messages]
     look = None
-    if wiki and cfg().get("wiki"):                # offline Wikipedia: the best paragraphs for this question
+    if wiki and cfg().get("wiki") and not card_topic(messages[-1]["content"]):
+        # offline Wikipedia: the best paragraphs for this question. Not when the team's cards cover
+        # it: 23 Oct the Indonesian wayang article overrode the Kelantan card (and it costs ~2.4 s)
         from iro.wiki import lookup
         look = lookup(messages[-1]["content"], lang or "en")
         if look["passages"]:
@@ -179,13 +209,14 @@ def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wik
             "top_p": 0.95, "cache_prompt": True, "chat_template_kwargs": {"enable_thinking": False},
             "id_slot": 0,                         # slot 0 keeps ARC's prompt cached; wiki keywords use slot 1
             # grammar: an optional <act> from the menu only, then text (no tag at all if acts=False)
-            "grammar": _grammar(messages[-1]["content"]) if acts else 'root ::= [^<]*\n',
+            "grammar": _grammar(messages[-1]["content"]) if acts else 'root ::= mood? [^<]*\n' + MOOD_RULE,
             "repeat_penalty": 1.15, "repeat_last_n": 128,      # 23 Oct: 2B looped "Selamat datang!" x100
             "stream_options": {"include_usage": True}}
     req = urllib.request.Request(url("/v1/chat/completions"), json.dumps(body).encode(),
                                  {"Content-Type": "application/json"})
     ttft = first_sentence = None
     raw, spoken_upto, usage, timings = "", 0, {}, {}
+    mood_told = False
     with urllib.request.urlopen(req, timeout=120) as r:
         for line in r:
             line = line.decode().strip()
@@ -202,19 +233,22 @@ def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wik
             if ttft is None:
                 ttft = time.time() - t0
             raw += delta
-            if raw.lstrip().startswith("<") and "</act>" not in raw and len(raw) < 40:
-                continue                          # still reading the action tag
-            text = ACT.sub("", raw, count=1)
+            _, mood_now, text, pending = split_tags(raw)
+            if pending:
+                continue                          # still reading an <act> / <mood> tag
+            if mood_now and on_mood and not mood_told:
+                on_mood(mood_now)                 # the voice switches mood before the first word
+                mood_told = True
             if first_sentence is None and re.search(r"[.!?](\s|$)", text):
                 first_sentence = time.time() - t0  # TTS can start speaking here
             if on_text and len(text) > spoken_upto:
                 on_text(text[spoken_upto:])
                 spoken_upto = len(text)
     total = time.time() - t0
-    m = ACT.match(raw)
-    text = re.sub(r"[*_#`]+|[\U0001F000-\U0001FAFF\u2600-\u27BF]", "", ACT.sub("", raw, count=1)).strip()  # spoken
+    act, mood, text, _ = split_tags(raw)
+    text = re.sub(r"[*_#`]+|[\U0001F000-\U0001FAFF\u2600-\u27BF]", "", text).strip()  # spoken
     n = usage.get("completion_tokens") or timings.get("predicted_n") or 0
-    return {"text": text, "act": m.group(1) if m else None, "lang": detect_lang(text),
+    return {"text": text, "act": act, "mood": mood, "lang": detect_lang(text),
             "ttft": ttft, "first_sentence": first_sentence or total, "total": total, "tokens": n,
             "tok_s": timings.get("predicted_per_second") or (n / max(total - (ttft or 0), 1e-3)),
             "prompt_ms": timings.get("prompt_ms"), "cached": timings.get("cache_n"),
@@ -227,8 +261,8 @@ def _grammar(text):
     from iro.skills import Body
     acts = {k: v for k, v in topic()["actions"].items() if re.search(INTENTS.get(k, r"$^"), text, re.I)}
     if not acts:
-        return 'root ::= [^<]*\n'
-    return Body().grammar(acts)
+        return 'root ::= mood? [^<]*\n' + MOOD_RULE
+    return Body().grammar(acts).replace("root ::= act? text", "root ::= act? mood? text") + MOOD_RULE
 
 
 # Only in owner turns (23 Oct: with both modes in the persona, the 2B model called visitors "sir").
@@ -251,7 +285,7 @@ INTENTS = {
 
 
 
-def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False):
+def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mood=None):
     """One visitor turn: safety words first (no model), then ARC's reply; a chosen skill runs while
     the reply is spoken, and if it reports something (what it saw, whether the pick worked) ARC
     tells the visitor in a short second reply. Returns the list of replies."""
@@ -279,7 +313,7 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False):
         else:
             sensing = None
     if not sensing:
-        a = ask(hist[-7:], lang=lang, on_text=on_text, state=f"{body.state()}. {who}")
+        a = ask(hist[-7:], lang=lang, on_text=on_text, state=f"{body.state()}. {who}", on_mood=on_mood)
         hist.append({"role": "assistant", "content": a["text"]})
         out = [a]
     if a["act"]:
@@ -291,7 +325,8 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False):
                                                     "two sentences what really happened, using ONLY this report; "
                                                     "if an object was recognised, say what it is and one fact "
                                                     "from your knowledge. If nothing was recognised, say so.)"})
-            b = ask(hist[-7:], lang=lang, on_text=on_text, wiki=False, acts=False, state=f"{body.state()}. {who}")
+            b = ask(hist[-7:], lang=lang, on_text=on_text, wiki=False, acts=False, state=f"{body.state()}. {who}",
+                    on_mood=on_mood)
             hist.append({"role": "assistant", "content": b["text"]})
             out.append(b)
     if log:

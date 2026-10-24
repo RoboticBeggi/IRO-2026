@@ -137,6 +137,28 @@ def embed(texts):
 
 # ------------------------------------------------------------------ the whole lookup
 
+_STOP = set("the a an and or of to in on at for is are was were be by with from as that this it what who when "
+             "where which how why do does did can you me my your about tell please".split())
+
+
+def bm25(docs, query, k1=1.5, b=0.75):
+    """BM25 scores of docs for query (Robertson & Zaragoza): the classic search-engine ranking. Needs no
+    model and no memory; the article search (Xapian) already found the right articles."""
+    tok = lambda t: [w for w in re.findall(r"[a-z0-9]+", t.lower()) if w not in _STOP]   # noqa: E731
+    D = [tok(d) for d in docs]
+    q = set(tok(query))
+    N, avg = len(D), (sum(len(d) for d in D) / max(len(D), 1)) or 1.0
+    df = {w: sum(w in set(d) for d in D) for w in q}
+    out = np.zeros(N)
+    for i, d in enumerate(D):
+        for w in q:
+            f = d.count(w)
+            if f:
+                idf = np.log(1 + (N - df[w] + 0.5) / (df[w] + 0.5))
+                out[i] += idf * f * (k1 + 1) / (f + k1 * (1 - b + b * len(d) / avg))
+    return out
+
+
 def keywords(question):
     """English search keywords from ARC's model, or None for small talk."""
     from iro.arc import url
@@ -176,10 +198,14 @@ def lookup(question, lang="en", top=3, chunk_words=110):
                 chunks.append((title, " ".join(buf)))
         t["read"] = time.time()
         if chunks:
-            start_embedder()
-            q = embed([f"task: question answering | query: {question}"])[0]
-            d = embed([f"title: {ti} | text: {tx}" for ti, tx in chunks[:48]])
-            s = d @ q
+            from iro.arc import cfg
+            if (cfg().get("embedder") or {}).get("enabled", False):
+                start_embedder()
+                q = embed([f"task: question answering | query: {question}"])[0]
+                d = embed([f"title: {ti} | text: {tx}" for ti, tx in chunks[:48]])
+                s = d @ q
+            else:                                  # 23 Oct: the embedder's 0.78 GB did not fit with ARC's voice
+                s = bm25([f"{ti} {tx}" for ti, tx in chunks[:48]], f"{kw} {question}")
             best = np.argsort(-s)[:top]
             out["passages"] = [(chunks[i][0], chunks[i][1], float(s[i])) for i in best]
         t["rank"] = time.time()

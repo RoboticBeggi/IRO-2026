@@ -57,6 +57,12 @@ def wait_up(url, what, log, secs=120):
     while not get(url):
         if time.time() - t0 > secs:
             raise SystemExit(f"{what} did not start in {secs} s: see {log}")
+        try:
+            tail = Path(log).read_text(errors="ignore")[-2000:]
+        except OSError:
+            tail = ""
+        if "FATAL" in tail or "out of memory" in tail:     # 23 Oct: the voice died and talk waited 2 min
+            raise SystemExit(f"{what} failed to start (memory?): see {log}\n  " + tail.strip().splitlines()[-1])
         time.sleep(0.3)
 
 
@@ -123,16 +129,22 @@ class Voice:
         if not get(self.url + "/health"):
             subprocess.Popen([str(QT / "build" / "tts-server"), "--model", str(MODELS / model), "--codec",
                               str(MODELS / c["codec"]), "--port", str(TTS_PORT), "--lang", c["lang"]],
-                             stdout=open("/tmp/arc-tts.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+                             stdout=open("/tmp/arc-tts.log", "w"), stderr=subprocess.STDOUT, start_new_session=True,
+                             env={**__import__("os").environ, "QWEN_KV_LEN": "1024"})   # 900 -> 225 MB (23 Oct)
             wait_up(self.url + "/health", "the Qwen voice", "/tmp/arc-tts.log")
         if self.voice.startswith("preset:"):
             self.name = self.voice.split(":", 1)[1]
-        else:                                      # a kept voice: register its clip once
-            d = VOICES / self.voice
-            post_json(self.url + "/v1/audio/voices", {
-                "name": self.voice, "ref_text": (d / "ref.txt").read_text().strip(),
-                "spk_b64": base64.b64encode((d / "ref.spk").read_bytes()).decode(),
-                "rvq_b64": base64.b64encode((d / "ref.rvq").read_bytes()).decode()}).read()
+        else:                                      # a kept voice (and its moods): register each clip once
+            self.moods = {}
+            for d in [VOICES / self.voice] + sorted(VOICES.glob(f"{self.voice}-*")):
+                if not (d / "ref.rvq").exists():
+                    continue
+                post_json(self.url + "/v1/audio/voices", {
+                    "name": d.name, "ref_text": (d / "ref.txt").read_text().strip(),
+                    "spk_b64": base64.b64encode((d / "ref.spk").read_bytes()).decode(),
+                    "rvq_b64": base64.b64encode((d / "ref.rvq").read_bytes()).decode()}).read()
+                if d.name != self.voice:
+                    self.moods[d.name[len(self.voice) + 1:]] = d.name
             self.name = self.voice
         self.q = queue.Queue()
         self.busy = threading.Event()
@@ -141,19 +153,21 @@ class Voice:
         self.wavs = []
         threading.Thread(target=self._worker, daemon=True).start()
 
-    def say(self, sentence, lang="English"):
+    def say(self, sentence, lang="English", mood=None):
+        """Queue a sentence; mood (amused / excited / concerned) uses that mood's clip if it exists."""
         self.busy.set()
-        self.q.put((sentence, lang))
+        self.q.put((sentence, lang, getattr(self, "moods", {}).get(mood, self.name)))
 
     def _worker(self):
         while True:
-            text, lang = self.q.get()
+            text, lang, name = self.q.get()
             play = subprocess.Popen(["pacat", "--raw", "--format=s16le", "--rate=24000", "--channels=1",
                                      f"--device={self.sink}"], stdin=subprocess.PIPE)
             got = bytearray()
             try:
-                with post_json(self.url + "/v1/audio/speech", {"input": text, "voice": self.name, "language": lang,
-                                                              "response_format": "pcm"}, timeout=120) as r:
+                with post_json(self.url + "/v1/audio/speech", {"input": text, "voice": name, "language": lang,
+                                                              "response_format": "pcm", "max_new_tokens": 600},
+                               timeout=120) as r:
                     while True:
                         chunk = r.read(4800)
                         if not chunk:
@@ -260,7 +274,7 @@ def main():
                 w.setsampwidth(2)
                 w.setframerate(RATE)
                 w.writeframes(u.tobytes())
-            buf = {"text": ""}
+            buf = {"text": "", "mood": None}
             voice.first_audio = None
             t_think = time.time()
 
@@ -270,12 +284,15 @@ def main():
                 buf["text"] += s
                 done, buf["text"] = sentences(buf["text"])
                 for sent in done:
-                    voice.say(sent, lang_names.get(lang, "English"))
+                    voice.say(sent, lang_names.get(lang, "English"), buf["mood"])
 
             print("ARC: ", end="", flush=True)
-            replies = respond(body, hist, text, lang, on_text=on_text, owner=is_owner)
+            replies = respond(body, hist, text, lang, on_text=on_text, owner=is_owner,
+                              on_mood=lambda m: buf.update(mood=m))
             if buf["text"].strip():
-                voice.say(buf["text"].strip(), lang_names.get(lang, "English"))
+                voice.say(buf["text"].strip(), lang_names.get(lang, "English"), buf["mood"])
+            if buf["mood"]:
+                print(f"     (mood: {buf['mood']})")
             while voice.first_audio is None and voice.speaking():
                 time.sleep(0.02)
             first = (voice.first_audio or time.time()) - t0

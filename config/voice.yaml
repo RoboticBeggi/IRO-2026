@@ -1,4 +1,4 @@
-voice: null
+voice: jarvis
 output: alsa_output.platform-3510000.hda.hdmi-stereo
 lang: English
 codec: qwen-tokenizer-12hz-Q8_0.gguf

@@ -4,6 +4,7 @@ topic: heritage
 model_dir: ~/llm-models
 wiki: true                  # look things up in offline Wikipedia (~/wiki/*.zim, iro/wiki.py)
 embedder:
+  enabled: false            # 23 Oct: its 0.78 GB did not fit with Whisper + the Qwen voice; BM25 ranks paragraphs instead
   file: embeddinggemma-300M-Q8_0.gguf
   url: https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf
 server:
