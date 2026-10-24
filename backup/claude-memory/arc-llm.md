@@ -25,3 +25,13 @@ Design (built 23 Oct): llama.cpp `llama-server` (~/llama.cpp, CUDA sm_87), model
 **24 Oct — memory/OOM rule:** the full ARC stack (Qwen3.5-2B ctx 6144 + Whisper turbo q5 + Qwen TTS KV 1024) plus VS Code on the Jetson ran it out of memory; the OOM killer took VS Code (the user's session). Now: every ARC server is spawned via iro.hw.system.expendable() (oom_score_adj 1000, dies first), `iro arc talk` refuses to start under 3000 MB free (--force), `iro arc stop` kills llama/whisper/tts servers. Do NOT start the full stack + tests while the user works in VS Code on the Jetson; stop servers after tests; suggest VS Code Remote-SSH from a laptop. Voice-loop upgrades 1-20/23 built in iro/talk.py (24 Oct bench: first sound 10-24 s -> median 1.77 s; inner pauses <= 0.5 s); open: Wikipedia answers weak with the 2B (BM25 picks wrong paragraph), Whisper mishears "wayang kulit" in accented speech.
 
 **24 Oct, audio breaks fixed:** the qwentts server sends ~0.5 s bursts and runs at RTF 1.1-1.3 while the LLM shares the GPU, so the speaker ran dry mid-sentence. `talk.Voice` now has a jitter buffer (`_hold_for`: 0.6 s + est·(RTF-1)/RTF, RTF measured per part), re-buffers 0.5 s after an underrun, and counts `underruns` (talk_bench prints "breaks"). The bench went from 2 breaks to 0, first sound median 1.38 s. Wiki: disambiguation `<li>` may start with text ("The <a…>"); "history of X" always looks it up, even when a card matches.
+
+**24 Oct, long pauses (run 20261024-134526):** the said_ clips hide the waits between parts. Now `Voice.heard_as()` / reply_NNN.wav keep the real silences, and talk_bench replays recorded questions (`--owner`). Root cause: GPU sharing. LLM and voice together each run at half speed (voice RTF 0.84 -> 1.55, LLM 25 -> 12 tok/s). Fixes:
+- `gpu_free` gate: new speech waits until the LLM is done; cached openers play meanwhile.
+- One sentence per part; all openers (incl. FACT_OPENERS) precached; "Well," waits in case it becomes "Well, sir,".
+- MAX_WORDS 35, and the LLM is stopped at the cap.
+- Config YAML cached (0.27 -> 0.014 s per turn).
+- A second reply after an action waits until the first reply's audio is made.
+- Requests ("could you wait") are no Wikipedia lookup.
+
+Remaining: one 1.3-2.9 s pause after the opener in LLM replies. This is GPU-bound: the total work exceeds the speech length. The Q4 talker crashes CUDA (illegal memory access).

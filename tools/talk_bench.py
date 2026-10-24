@@ -4,7 +4,7 @@ the Jarvis voice exactly as in `iro arc talk`. Measures, per question: transcrip
 "the visitor stopped" to ARC's first sound, and the silences between parts of the spoken reply.
 Plays through the speakers (so you can listen too) and saves what was said.
 
-    ~/iro-2026/tools/talk_bench.py [--owner] [WAV ...]     default: the questions in tools/talk_bench/
+    ~/iro-2026/tools/talk_bench.py [--owner] [--idle=SECONDS] [WAV ...]     default: the questions in tools/talk_bench/
 
 What was heard (silences included) goes to /tmp/bench_<question>.wav.
 """
@@ -22,6 +22,8 @@ from iro.skills import Body  # noqa: E402
 
 QUESTIONS = Path(__file__).resolve().parent / "talk_bench"
 OWNER = "--owner" in sys.argv                     # answer as to the owner ("sir"): longer, LLM-made replies
+IDLE = float(next((x.split("=")[1] for x in sys.argv if x.startswith("--idle=")), 0))   # s between questions,
+#                                                   like a real conversation (the GPU cools down meanwhile)
 
 
 def load16(p):
@@ -46,7 +48,7 @@ def gaps(pcm, thr=250, min_gap=0.15):
 
 
 def main():
-    args = [x for x in sys.argv[1:] if x != "--owner"]
+    args = [x for x in sys.argv[1:] if x != "--owner" and not x.startswith("--idle")]
     wavs = [Path(x) for x in args] or sorted(QUESTIONS.glob("*.wav"))
     t = time.time()
     arc.start(quiet=True)
@@ -59,6 +61,7 @@ def main():
     body = Body()
     rows = []
     for w in wavs:
+        time.sleep(IDLE)
         u = load16(w)
         voice.wavs.clear()
         t0 = time.time()

@@ -241,7 +241,8 @@ QWORDS = set("who whom whose what which when where why how is are was were do do
              "know more give story history founded found built made invented discovered created wrote "
              "composed started began happened mean meaning called name named this that it its them those these "
              "sure okay ok yes yeah please something anything more like hear learn would want some little bit "
-             "interesting interested".split())
+             "interesting interested hello hi hey kids guys everyone actually really just information info "
+             "facts details thanks thank".split())
 CONTEXT = set("malaysia malaysian malay malacca melaka kelantan terengganu sultan sultanate king kingdom austria "
               "austrian vienna habsburg heritage tradition traditional culture history historical".split())
 ABBREV = re.compile(r"\b(c|ca|St|Dr|Mr|Mrs|Ms|Jr|Sr|vs|e\.g|i\.e|U\.S|No|approx|est|b|d|r)\.$")
@@ -282,10 +283,11 @@ def _candidates(q):
     content = topic_words(q)
     out = []
     m = re.search(r"\bhistory of (?:the )?([A-Za-zÀ-ÿ' -]+)", q, re.I)
-    if m:
-        x = " ".join(w for w in m.group(1).split() if w.lower() not in QWORDS)
-        if x:
-            out += [f"History of {x}", f"History of the {x}"]
+    x = m and " ".join(w for w in m.group(1).split() if w.lower() not in QWORDS)
+    if not x and re.search(r"\bhistor(y|ical)\b", q, re.I) and content:
+        x = " ".join(content)                      # "some history information about Japan" (24 Oct)
+    if x:
+        out += [f"History of {x}", f"History of the {x}"]
     for n in range(min(4, len(content)), 0, -1):
         for i in range(len(content) - n + 1):
             g = content[i:i + n]

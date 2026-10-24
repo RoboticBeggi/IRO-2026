@@ -53,6 +53,7 @@ UNFINISHED = re.compile(r"(,|\b(and|but|or|so|because|the|a|an|of|to|with|for|my
 ACKS = {"visitor": ["Hmm, let me think.", "Ah, good question. One moment.", "Let me see what I know."],
         "owner": ["One moment, sir.", "Hmm, let me look that up, sir.", "Certainly, sir. Thinking."]}
 TEMPS = {None: 0.7, "amused": 0.95, "excited": 0.95, "curious": 0.85, "concerned": 0.75, "warm": 0.8, "proud": 0.85}
+URGENT_FIRST = os.environ.get("ARC_URGENT_FIRST", "1") == "1"
 WORDS_PER_S = 2.6                                   # the Jarvis voice speaks ~155 words a minute
 BREATH_S = 0.25                                     # natural pause between parts (#15)
 
@@ -231,6 +232,15 @@ class Voice:
             self.name = self.voice
             base = rms.get(self.name, 3000.0)
             self.gain = {n: float(np.clip(base / v, 0.6, 1.6)) for n, v in rms.items()}   # even loudness (#18)
+        # each voice is slow the first time after the server starts (0.7-1.4 s to the first sound and
+        # slower than speech, 24 Oct: the first excited reply paused 4.4 s): use every one once now
+        for name in [self.name] + list(self.moods.values()):
+            try:
+                body = {"input": "Ready.", "voice": name, "language": c["lang"], "response_format": "pcm"}
+                with post_json(self.url + "/v1/audio/speech", body, timeout=60) as r:
+                    r.read()
+            except Exception:                      # noqa: BLE001 - only a warm-up
+                pass
         self.cache = {}
         self.cache_dir = Path.home() / "voice-samples" / "cache" / self.voice
         self.text_q, self.audio_q = queue.Queue(), queue.Queue()
@@ -240,7 +250,8 @@ class Voice:
         self.first_audio = None
         self.underruns = 0
         self.timeline = []                         # (wall-clock start, seconds, audio) of each spoken chunk
-        self.rtf = 1.0                             # voice seconds of work per second of speech (measured)
+        self.rtf = 0.85                            # voice seconds of work per second of speech (measured;
+        #                                            0.80-0.87 alone on the GPU, 24 Oct)
         self.stop_flag = threading.Event()
         # the GPU is shared: voice and LLM together each run at half speed (24 Oct: voice RTF 0.84 ->
         # 1.55, LLM 25 -> 12 tok/s), which made the voice slower than speech and left 2-5 s holes.
@@ -297,15 +308,16 @@ class Voice:
         """Whole text as one trimmed int16 array (for the cache)."""
         return trim(np.concatenate(list(self._stream(text, mood)) or [np.zeros(0, np.int16)]))
 
-    def say(self, text, lang="English", mood=None):
-        """Queue a part of a reply (a clause, a paragraph or a cached line)."""
+    def say(self, text, lang="English", mood=None, urgent=False):
+        """Queue a part of a reply (a clause, a paragraph or a cached line). urgent: made at once even
+        while the LLM writes (the first sentence after the opener)."""
         text = text.strip()
         if not text:
             return
         with self.lock:
             self.pending += 1
             self.queued_s += self._est(text)
-        self.text_q.put((text, lang, mood))
+        self.text_q.put((text, lang, mood, urgent))
 
     @staticmethod
     def _est(text):
@@ -318,12 +330,13 @@ class Voice:
 
     def _synth(self):
         while True:
-            text, lang, mood = self.text_q.get()
+            text, lang, mood, urgent = self.text_q.get()
             try:
                 if (text, mood) in self.cache:
                     self.audio_q.put(self.cache[(text, mood)])
                 else:
-                    self.gpu_free.wait(timeout=20)
+                    if not urgent:
+                        self.gpu_free.wait(timeout=20)
                     self.audio_q.put(("part", self._est(text)))
                     t0, made = time.time(), 0
                     head = True                    # trim the silence the voice adds at the start
@@ -338,15 +351,16 @@ class Voice:
                                 continue
                             a, head = a[max(0, loud[0] - 720):], False
                         a = np.concatenate([tail, a])
-                        keep = int(OUT_RATE * 0.4)     # hold back 0.4 s to trim the trailing silence
-                        if len(a) > keep:
-                            self.audio_q.put(a[:-keep])
-                            tail = a[-keep:]
-                        else:
-                            tail = a
+                        # hold back only the quiet end (it may be the trailing silence, trimmed below):
+                        # a fixed 0.4 s held back most of the first 0.5 s burst and delayed the start
+                        loud = np.flatnonzero(np.abs(a) > 250)
+                        cut = loud[-1] + 720 if len(loud) else 0
+                        if cut:
+                            self.audio_q.put(a[:cut])
+                        tail = a[cut:]
                     loud = np.flatnonzero(np.abs(tail) > 250)
                     self.audio_q.put(tail[: loud[-1] + 720] if len(loud) else tail[:0])
-                    if made > OUT_RATE and not self.stop_flag.is_set():
+                    if made > OUT_RATE and not self.stop_flag.is_set() and self.gpu_free.is_set():
                         self.rtf = 0.6 * self.rtf + 0.4 * (time.time() - t0) / (made / OUT_RATE)
             except Exception as e:                 # noqa: BLE001 - skip this part, keep talking
                 print(f"\n(voice problem: {e})")
@@ -392,7 +406,7 @@ class Voice:
         start late enough that generation finishes before playback catches up with it. The server also
         sends audio in ~0.5 s bursts, so at least one burst's worth is always held (the cached opener
         usually plays meanwhile, so this rarely delays the first sound)."""
-        r = self.rtf * 1.15                        # a little safety
+        r = self.rtf * 1.1                         # a little safety
         return min(est_s, 0.6 + max(0.0, est_s * (r - 1) / r))
 
     def _play(self):
@@ -482,14 +496,15 @@ class Splitter:
 
     LOW_S = 2.5                                    # less speech than this still to come: hand over now
 
-    MAX_WORDS = 45                                 # the 2B ignores "about 35 words": spoke 16.8 s (24 Oct)
+    MAX_WORDS = 35                                 # the 2B ignores "about 35 words": spoke 16.8 s (24 Oct)
 
     def __init__(self, voice, lang, mood_ref):
         from iro.arc import all_openers
         self.voice, self.lang, self.mood = voice, lang, mood_ref
         self.buf, self.first_done, self.opener_done = "", False, False
         self.openers = sorted(all_openers(), key=len, reverse=True)
-        self.said_words, self.done = 0, False
+        self.said_words, self.done, self.model_done = 0, False, False
+        self.urgent_used = False
         voice.gpu_free.clear()                     # the LLM may be about to write: new speech waits (see Voice)
 
     def _say(self, text):
@@ -505,13 +520,37 @@ class Splitter:
                     break
             text, self.done = " ".join(keep), True
         self.said_words += len(text.split())
-        self.voice.say(text, self.lang, self.mood["mood"])
+        # one sentence per part: short parts start fast, and the next is made while this one plays
+        # (one 40-word paragraph waited 1.3 s for its buffer, 24 Oct). Tiny ones join the next.
+        part = ""
+        for x in re.split(r"(?<=[.!?])\s+", text.strip()):
+            part = f"{part} {x}".strip()
+            if len(part.split()) >= 4:
+                self._out(part)
+                part = ""
+        if part:
+            self._out(part)
+
+    def _out(self, text):
+        # the first sentence after the opener is made at once, sharing the GPU with the LLM; the rest
+        # waits until the LLM is done (all of it at once made the voice slower than speech)
+        urgent = self.opener_done and not self.urgent_used
+        self.urgent_used |= urgent
+        self.voice.say(text, self.lang, self.mood["mood"], urgent=urgent and URGENT_FIRST)
 
     def feed(self, s):
         """Returns False once the word limit is spoken: the caller can stop the model. "" means the
         model has stopped writing: the voice may have the GPU now."""
         if not s:
             self.voice.gpu_free.set()
+            self.model_done = True
+        elif s == "\n" and self.model_done:      # respond() starts a second reply (after an action):
+            self.flush()                           # let the voice finish making the first one, then
+            t = time.time()                        # give the model the GPU (24 Oct: both at once = breaks)
+            while self.voice.pending and time.time() - t < 15:
+                time.sleep(0.05)
+            self.voice.gpu_free.clear()
+            self.model_done = False
         self._feed(s)
         return not self.done
 

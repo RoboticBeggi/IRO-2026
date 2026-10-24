@@ -18,6 +18,7 @@ generation: Chan et al. 2024, "Don't Do RAG"). Thinking mode is off: a spoken re
 Every turn is recorded (iro review): question, language, reply, action, timings.
 """
 
+import copy
 import json
 import os
 import re
@@ -56,8 +57,20 @@ def split_tags(raw):
     return act, mood, rest, pending
 
 
+_LOADED = {}
+
+
+def _read(path, parse):
+    """A config file parsed once, re-read only when it changes (each turn read 38 YAML files: 0.27 s)."""
+    m = path.stat().st_mtime
+    hit = _LOADED.get(path)
+    if not hit or hit[0] != m:
+        hit = _LOADED[path] = (m, parse(path.read_text()))
+    return copy.deepcopy(hit[1])
+
+
 def cfg():
-    return yaml.safe_load(CFG.read_text())
+    return _read(CFG, yaml.safe_load)
 
 
 def url(path=""):
@@ -68,13 +81,14 @@ def url(path=""):
 
 def card(name):
     """(front matter dict, text) of arc/knowledge/NAME.md."""
-    raw = (ARC / "knowledge" / f"{name}.md").read_text()
-    _, head, body = raw.split("---", 2)
-    return yaml.safe_load(head), body.strip()
+    def parse(raw):
+        _, head, body = raw.split("---", 2)
+        return yaml.safe_load(head), body.strip()
+    return _read(ARC / "knowledge" / f"{name}.md", parse)
 
 
 def topic(name=None):
-    return yaml.safe_load((ARC / "topics" / f"{name or cfg()['topic']}.yaml").read_text())
+    return _read(ARC / "topics" / f"{name or cfg()['topic']}.yaml", yaml.safe_load)
 
 
 QUESTION = (r"\?|\b(what|who|whom|whose|when|where|why|how|which|tell me|explain|describe|apa|siapa|bila|"
@@ -99,7 +113,13 @@ def needs_lookup(q):
     from iro.wiki import topic_words
     about_arc = r"\b(who|what|how) are you\b|\byour(self)?\b|\babout you\b|\barc\b"   # "do you know..." is fine
     history = bool(re.search(r"\bhistory of\b", q, re.I))    # the cards hold no history: always look it up
-    if not cfg().get("wiki") or (card_topic(q) and not history) or small_talk(q) or re.search(about_arc, q, re.I):
+    # said to ARC itself, not a question about the world: "Could you wait for me?" came back as "The
+    # Wait, an album by ZOX", "Why did you cut off the audio?" as Pink Floyd's "The Final Cut" (24 Oct).
+    # Asking to be told something still counts ("could you give me some history about Japan").
+    request = re.search(r"\byou\b", q, re.I) and not re.search(
+        r"\b(tell|explain|describe|teach|give me|know|information|info|facts?|story|stories)\b", q, re.I)
+    if not cfg().get("wiki") or (card_topic(q) and not history) or small_talk(q) or re.search(about_arc, q, re.I) \
+            or (request and not history):
         return False
     if MORE.search(q) and LAST_FACT.get("sents") and not topic_words(q):
         return True                                # "tell me more" continues the last article
