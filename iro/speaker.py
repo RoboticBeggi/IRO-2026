@@ -93,6 +93,49 @@ def array_source():
     raise SystemExit("the reSpeaker mic array is not an input: is it plugged in? (iro doctor)")
 
 
+EC_SOURCE, EC_SINK, EC_MIC = "arc_ec_src", "arc_ec_sink", "arc_mic"
+
+
+def _pactl(*a):
+    return subprocess.run(["pactl", *a], capture_output=True, text=True)
+
+
+def echo_cancel(sink):
+    """Software echo cancelling (PulseAudio's WebRTC canceller) between the array's chosen channel and
+    `sink`. ARC plays into EC_SINK (passed on to `sink`) and listens on EC_SOURCE, from which its own
+    voice is removed. The array's own canceller cannot do this for the HDMI speaker: it needs the echo
+    within 40 samples of its reference, at a constant delay (XMOS XVF3800 tuning guide); HDMI is tens
+    of ms and drifts (24 Oct: it then muted the owner too). Measured 24 Oct: ARC alone on the plain
+    mic was transcribed word for word, through the canceller as nothing.
+    Loaded only while ARC talks (echo_cancel_off() removes it): nothing is changed for good.
+    Returns True when EC_SOURCE / EC_SINK are ready."""
+    if EC_SOURCE in _pactl("list", "short", "sources").stdout:
+        return True
+    echo_cancel_off()
+    ch = "front-left" if mic_channel() == 0 else "front-right"
+    try:
+        src = array_source()
+    except SystemExit:
+        return False
+    r1 = _pactl("load-module", "module-remap-source", f"source_name={EC_MIC}", f"master={src}", "channels=1",
+                f"master_channel_map={ch}", "channel_map=mono")
+    # 32 kHz keeps the voice's full 24 kHz quality; the array already removes noise, so WebRTC's
+    # noise suppression and gain control stay off (they change the voice the owner check knows)
+    r2 = _pactl("load-module", "module-echo-cancel", "aec_method=webrtc", f"source_master={EC_MIC}",
+                f"sink_master={sink}", f"source_name={EC_SOURCE}", f"sink_name={EC_SINK}", "rate=32000",
+                "channels=1", 'aec_args="analog_gain_control=0 digital_gain_control=0 noise_suppression=0"')
+    if r1.returncode or r2.returncode:
+        echo_cancel_off()
+        return False
+    return True
+
+
+def echo_cancel_off():
+    for line in _pactl("list", "short", "modules").stdout.splitlines():
+        if EC_SOURCE in line or f"source_name={EC_MIC}" in line:
+            _pactl("unload-module", line.split("\t")[0])
+
+
 VAD_MODEL = Path.home() / "voice-models" / "silero_vad.onnx"
 
 
@@ -107,14 +150,20 @@ class Stream:
     """16 kHz audio from the array through PulseAudio (it holds the card; arecord is refused).
     Both channels arrive; read(n) returns n samples of the chosen one (or both with both=True)."""
 
-    def __init__(self, channel=None):
+    def __init__(self, channel=None, echo_cancelled=False):
+        """echo_cancelled: read the echo-cancelled mono source (echo_cancel()) instead of both channels."""
         self.ch = mic_channel() if channel is None else channel
-        self.p = subprocess.Popen(["parec", f"--device={array_source()}", f"--rate={RATE}", "--channels=2",
+        dev, n = (EC_SOURCE, 1) if echo_cancelled else (array_source(), 2)
+        self.mono = n == 1
+        self.p = subprocess.Popen(["parec", f"--device={dev}", f"--rate={RATE}", f"--channels={n}",
                                    "--format=s16le", "--raw", "--latency-msec=30"], stdout=subprocess.PIPE)
         self.stdout = self                        # old interface: .stdout.read(nbytes) of mono
         self.read_both(int(RATE * 0.3))           # the first moments after the input wakes are silent
 
     def read_both(self, n):
+        if self.mono:                             # one (echo-cancelled) channel: give it as both
+            a = np.frombuffer(self.p.stdout.read(n * 2), np.int16)
+            return np.stack([a, a], 1)
         raw = self.p.stdout.read(n * 4)
         return np.frombuffer(raw, np.int16).reshape(-1, 2)
 
@@ -125,8 +174,8 @@ class Stream:
         self.p.terminate()
 
 
-def stream():
-    return Stream()
+def stream(echo_cancelled=False):
+    return Stream(echo_cancelled=echo_cancelled)
 
 
 def record(seconds, both=False):

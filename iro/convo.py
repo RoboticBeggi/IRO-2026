@@ -83,12 +83,21 @@ def is_stop(text):
     return len(words(text)) <= 4 and bool(STOP_PHRASES.search(text))
 
 
+EMPTY = set("i i'm said say saying mean meant so well just it me my you okay right like and but then "
+            "that this was is".split())
+
+
 def is_noise(text):
-    """A turn not worth answering: only fillers, or one stray word (feature 9)."""
+    """A turn not worth answering: only fillers, one stray word, or nothing with meaning ("I said.",
+    24 Oct: it got a long made-up reply) (feature 9)."""
     w = [x for x in words(text) if x not in FILLERS]
     if not w:
         return True
-    return len(w) == 1 and w[0] not in SHORT_OK and len(w[0]) < 4
+    if any(x in SHORT_OK for x in w):
+        return False
+    if all(x in EMPTY for x in w):
+        return True
+    return len(w) == 1 and len(w[0]) < 4
 
 
 FUNCTION = set("the and you can could would tell what about for with this that are is was who how why when "

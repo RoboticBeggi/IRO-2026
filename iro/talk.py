@@ -267,7 +267,13 @@ class Voice:
         self.gpu_free.set()
         self.wavs = []
         self.player = self.ref_player = None
-        self.aec_ref = bool(c.get("aec_reference", True))
+        # the XVF3800's own canceller cannot follow the HDMI speaker (see speaker.echo_cancel): feeding
+        # it a reference muted the owner too (24 Oct). Off unless voice.yaml says aec_reference: true.
+        self.aec_ref = bool(c.get("aec_reference", False))
+        from iro.speaker import EC_SINK, echo_cancel
+        self.echo_cancelled = bool(c.get("echo_cancel", True)) and echo_cancel(self.sink)
+        if self.echo_cancelled:
+            self.sink = EC_SINK                    # played through the canceller, which passes it on
         threading.Thread(target=self._synth, daemon=True).start()
         threading.Thread(target=self._play, daemon=True).start()
         self.precache([(line, None) for line in lines])   # common lines (#6); also warms the voice (#9)
@@ -417,17 +423,18 @@ class Voice:
         g = self.volume * self.duck_gain
         if g != 1.0:
             a = np.clip(a.astype(np.float32) * g, -32767, 32767).astype(np.int16)
-        try:
-            self.player.stdin.write(a.tobytes())
-            self.player.stdin.flush()
-        except BrokenPipeError:
-            self.player = None
-        if self.ref_player:
+        # local handles: stop() (the ears' thread, on "wait") may kill and clear the players at any
+        # moment (24 Oct: AttributeError here killed the player thread and ARC never spoke again)
+        for name in ("player", "ref_player"):
+            pl = getattr(self, name)
+            if pl is None:
+                continue
             try:
-                self.ref_player.stdin.write(a.tobytes())
-                self.ref_player.stdin.flush()
-            except BrokenPipeError:
-                self.ref_player = None
+                pl.stdin.write(a.tobytes())
+                pl.stdin.flush()
+            except (BrokenPipeError, OSError, ValueError, AttributeError):
+                if getattr(self, name) is pl:
+                    setattr(self, name, None)
 
     def _hold_for(self, est_s):
         """Seconds of audio to gather before a part starts (jitter buffer). The voice is slower than
@@ -439,6 +446,14 @@ class Voice:
         return min(est_s, 0.6 + max(0.0, est_s * (r - 1) / r))
 
     def _play(self):
+        while True:                                # never let one bad moment silence ARC for good
+            try:
+                self._play_loop()
+            except Exception as e:                 # noqa: BLE001
+                print(f"\n(voice player problem: {e}; carrying on)")
+                time.sleep(0.05)
+
+    def _play_loop(self):
         got, held, hold = [], [], 0.0
         while True:
             a = self.audio_q.get()
@@ -693,15 +708,22 @@ class Ears:
     EXCESS = 2.2                                   # mic this many times louder than the expected echo
     HOT_FRAMES = 6                                 # ~0.2 s of loud speech: a candidate
     DECIDE_S = 1.1                                 # how much is heard before judging
+    EARLY_S = 0.7                                  # a first quick look, for "stop" / "wait" only
 
     ECHO_SIM = 0.62                                # this close to ARC's own echo voiceprint = ARC itself
 
-    def __init__(self, voice, barge_in=True, log=None, embedder=None):
+    def __init__(self, voice, barge_in=True, log=None, embedder=None, save_dir=None):
         from iro.speaker import Vad, stream
         self.voice, self.barge_in, self.log = voice, barge_in, log or (lambda *a, **k: None)
-        self.emb = embedder                        # speaker embeddings (iro.speaker.Ears), or None
+        self.save_dir, self.n_saved = save_dir, 0  # each "maybe you" moment kept as a wav (review)
+        if voice.echo_cancelled:
+            # ARC's voice is already removed from what we hear (speaker.echo_cancel): speech now is
+            # almost surely a person, so no loudness test and a quicker trigger. 24 Oct, without
+            # this: the owner's "wait" / "stop" while ARC talked loudly mostly went unnoticed.
+            self.EXCESS, self.HOT_FRAMES = 0.0, 4
+        self.emb = None if voice.echo_cancelled else embedder   # echo voiceprints: only without the canceller
         self.echo_prints, self.echo_buf, self.echo_busy = [], [], False
-        self.proc = stream()                       # through PulseAudio (it holds the sound card)
+        self.proc = stream(echo_cancelled=voice.echo_cancelled)   # through PulseAudio (it holds the card)
         self.vad = Vad()
         self.bvad = Vad(threshold=0.6, min_silence=0.25, min_speech=0.2)
         self.q = queue.Queue()
@@ -709,7 +731,7 @@ class Ears:
         self.pre = []                              # the last ~0.5 s (the start of an interruption)
         self.ratio = []                            # mic level / playing level while ARC talks
         self.cand, self.hot, self.cool = None, 0, 0.0
-        self.verdict, self.deciding = None, False
+        self.verdict, self.deciding, self.early_done = None, False, False
         self.stopped = threading.Event()           # set when "stop" / an interruption stopped ARC
         threading.Thread(target=self._loop, daemon=True).start()
 
@@ -754,15 +776,18 @@ class Ears:
             if self.hot >= self.HOT_FRAMES:
                 self.cand, self.hot = list(self.pre), 0
                 self.voice.duck(0.35)              # polite: lower the voice while finding out
-                self.log("barge", event="candidate", excess=round(excess, 1))
+                self.log("barge_candidate", excess=round(excess, 1))
             return
         self.cand.append(a)
+        heard_s = len(self.cand) * self.FRAME / RATE
         if self.verdict:
             self._apply(self.verdict)
-        elif not self.deciding and len(self.cand) * self.FRAME / RATE >= self.DECIDE_S:
+        elif not self.deciding and (heard_s >= self.DECIDE_S or (heard_s >= self.EARLY_S and not self.early_done)):
+            final = heard_s >= self.DECIDE_S
+            self.early_done = True
             self.deciding = True
             pcm, spoken = np.concatenate(self.cand), self.voice.recent_spoken()
-            threading.Thread(target=self._decide, args=(pcm, spoken), daemon=True).start()
+            threading.Thread(target=self._decide, args=(pcm, spoken, final), daemon=True).start()
 
     def _learn_echo(self, pcm):
         try:
@@ -776,19 +801,33 @@ class Ears:
             return None
         return float(np.max(np.array(self.echo_prints) @ self.emb.embed(pcm)))
 
-    def _decide(self, pcm, spoken):
+    def _decide(self, pcm, spoken, final=True):
+        """final=False: the early look (after EARLY_S), which only acts on "stop" / "wait"."""
         from iro.convo import judge
         text, _ = transcribe(pcm)
         v = judge(text, spoken)
-        sim = self.echo_sim(pcm)
+        if not final and v != "stop":
+            self.deciding = False                  # not a stop word: wait for the full look
+            return
+        sim = self.echo_sim(pcm) if v == "interrupt" and not self.voice.echo_cancelled else None
         if v == "interrupt" and sim is not None and sim >= self.ECHO_SIM:
             v = "echo"                             # new-looking words, but ARC's own voice: misheard echo
-        self.log("barge", event=v, heard=text, echo_sim=sim and round(sim, 2), arc_was_saying=spoken[:120])
+        wav = ""
+        if self.save_dir:
+            self.n_saved += 1
+            wav = f"barge_{self.n_saved:03d}.wav"
+            with wave.open(str(self.save_dir / wav), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(RATE)
+                w.writeframes(pcm.tobytes())
+        self.log("barge", event=v, heard=text, echo_sim=sim and round(sim, 2), wav=wav,
+                 arc_was_saying=spoken[:120])
         self.verdict = v
 
     def _apply(self, v):
         heard = self.cand
-        self.cand, self.verdict, self.deciding = None, None, False
+        self.cand, self.verdict, self.deciding, self.early_done = None, None, False, False
         if v == "echo":                            # only ARC's echo or noise: carry on
             self.voice.duck(1.0)
             self.cool = time.time() + 1.0
@@ -883,7 +922,7 @@ def main():
     ring = Ring(mic)
     body = Body(robot="--robot" in a)
     owner_id = Owner()
-    ears = Ears(voice, barge_in="--no-barge-in" not in a, log=r.log, embedder=owner_id.ears)
+    ears = Ears(voice, barge_in="--no-barge-in" not in a, log=r.log, embedder=owner_id.ears, save_dir=r.dir)
     from iro.voice import cfg as voice_cfg
     from iro.voice import save_cfg
     reply_words = int(voice_cfg().get("reply_words", Splitter.MAX_WORDS))
@@ -939,11 +978,10 @@ def main():
                 if text:
                     r.log("ignored", heard=text)   # "uh", "hmm", one stray word (feature 9)
                 continue
-            if ears.stopped.is_set():              # you just stopped ARC: "stop" itself needs no answer
-                ears.stopped.clear()
-                if convo.is_stop(text):
-                    r.log("stopped", heard=text)
-                    continue
+            ears.stopped.clear()
+            if convo.is_stop(text):                # "hold on", "wait", "stop": stop and listen, no answer
+                r.log("stopped", heard=text)       # (24 Oct: "Hold on" got a long reply about songket)
+                continue
             if asleep:                             # feature 10: only its name wakes it
                 if not convo.WAKE.search(text):
                     continue
@@ -1036,6 +1074,8 @@ def main():
     finally:
         if last:
             keep_reply()
+        from iro.speaker import echo_cancel_off
+        echo_cancel_off()
         ears.close()
         if mic:
             mic.close()

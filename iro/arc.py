@@ -103,7 +103,8 @@ MORE = re.compile(r"\b(more|go on|continue|and then|tell me about (this|that|it)
 def small_talk(q):
     """Greetings, thanks, goodbyes and very short remarks: no encyclopedia needed (24 Oct: "bye bye"
     triggered a full Wikipedia lookup and took 57 s)."""
-    if re.search(QUESTION, q, re.I):
+    from iro.wiki import relation
+    if re.search(QUESTION, q, re.I) or relation(q):    # "Capital of Malaysia." is a question
         return False
     return len(re.findall(r"\w+", q)) <= 3 or bool(re.search(INTENTS["greet"] + "|" + INTENTS["bow"], q, re.I))
 
@@ -113,7 +114,9 @@ def needs_lookup(q):
     # only real questions: "I like your voice" went to Wikipedia and came back as a Korean TV show (24 Oct)
     from iro.wiki import topic_words
     about_arc = r"\b(who|what|how) are you\b|\byour(self)?\b|\babout you\b|\barc\b"   # "do you know..." is fine
-    history = bool(re.search(r"\bhistory of\b", q, re.I))    # the cards hold no history: always look it up
+    from iro.wiki import relation
+    # the cards hold no history and no "capital of": always look those up
+    history = bool(re.search(r"\bhistory of\b", q, re.I)) or bool(relation(q))
     # said to ARC itself, not a question about the world: "Could you wait for me?" came back as "The
     # Wait, an album by ZOX", "Why did you cut off the audio?" as Pink Floyd's "The Final Cut" (24 Oct).
     # Asking to be told something still counts ("could you give me some history about Japan").
@@ -122,8 +125,10 @@ def needs_lookup(q):
     if not cfg().get("wiki") or (card_topic(q) and not history) or small_talk(q) or re.search(about_arc, q, re.I) \
             or (request and not history):
         return False
-    if MORE.search(q) and LAST_FACT.get("sents") and not topic_words(q):
+    if MORE.search(q) and LAST_FACT.get("sents") and (not topic_words(q) or _same_topic(q)):
         return True                                # "tell me more" continues the last article
+    if relation(q):                                # "Capital of Malaysia." asks, even without "what"
+        return True
     return bool(re.search(QUESTION, q, re.I)) and bool(topic_words(q))
 
 
@@ -445,12 +450,19 @@ def all_openers():
 LAST_FACT = {}                                     # the article ARC last answered from (for "tell me more")
 
 
+def _same_topic(q):
+    """'Tell me more about Japan' right after Japan: carry on in that article, do not start again."""
+    from iro.wiki import topic_words
+    tw = [w for w in topic_words(q) if not MORE.search(w)]
+    return bool(tw) and all(w.lower() in LAST_FACT.get("title", "").lower() for w in tw)
+
+
 def _fact(q, owner):
     """{text, title, ms}: a spoken answer made directly from the article's summary, or None.
     "Tell me more" (no new topic) continues the same article with its next sentences."""
     import random
     from iro.wiki import summary, topic_words
-    if MORE.search(q) and LAST_FACT.get("sents") and not topic_words(q):
+    if MORE.search(q) and LAST_FACT.get("sents") and (not topic_words(q) or _same_topic(q)):
         i = LAST_FACT["pos"]
         nxt = LAST_FACT["sents"][i:i + 2]
         if not nxt:
@@ -659,6 +671,8 @@ def main():
         stop()
         for name in ("llama-server", "whisper-server", "tts-server"):
             subprocess.run(["pkill", "-x", name], check=False)
+        from iro.speaker import echo_cancel_off
+        echo_cancel_off()                          # the echo canceller ARC loads into PulseAudio
         print("ARC stopped: language model, Wikipedia helper, Whisper and the voice server")
         return 0
     print(__doc__)

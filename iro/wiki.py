@@ -242,9 +242,14 @@ QWORDS = set("who whom whose what which when where why how is are was were do do
              "composed started began happened mean meaning called name named this that it its them those these "
              "sure okay ok yes yeah please something anything more like hear learn would want some little bit "
              "interesting interested hello hi hey kids guys everyone actually really just information info "
-             "facts details thanks thank".split())
+             "facts details thanks thank meant see saw said say saying asked ask didn't don't except again "
+             "um uh".split())
 CONTEXT = set("malaysia malaysian malay malacca melaka kelantan terengganu sultan sultanate king kingdom austria "
-              "austrian vienna habsburg heritage tradition traditional culture history historical".split())
+              "austrian vienna habsburg heritage tradition traditional culture history historical waltz strauss "
+              "composer music opera palace empire emperor empress puppet theatre dance folk".split())
+# what people say -> the article's name ("the history of America" means the United States)
+ALIAS = {"america": "United States", "usa": "United States", "us": "United States", "uk": "United Kingdom",
+         "britain": "United Kingdom", "england": "England", "holland": "Netherlands"}
 ABBREV = re.compile(r"\b(c|ca|St|Dr|Mr|Mrs|Ms|Jr|Sr|vs|e\.g|i\.e|U\.S|No|approx|est|b|d|r)\.$")
 
 
@@ -273,8 +278,68 @@ def sentences_of(t):
 
 
 def topic_words(q):
-    """The question's content words (no fillers, pronouns, question words): empty = no real topic."""
-    return [w for w in re.findall(r"[A-Za-zÀ-ÿ'-]+", q) if w.lower() not in QWORDS]
+    """The question's content words (no fillers, pronouns, question words), each once ("Japan. Japan."
+    found the film "Japan Japan", 24 Oct): empty = no real topic."""
+    out = []
+    for w in re.findall(r"[A-Za-zÀ-ÿ'-]+", q):
+        if w.lower() not in QWORDS and w.lower() not in (x.lower() for x in out):
+            out.append(w)
+    return out
+
+
+# "the capital of Malaysia": look up MALAYSIA and answer from its capital sentence (24 Oct: the title
+# search found "Capital city", "Capital Country" in Australia and a footballer named See)
+RELATION = re.compile(r"\b(capital(?: city)?|population|currency|president|prime minister|king|queen|sultan|"
+                      r"ruler|leader|head of state|national language|official language|languages?|largest city|"
+                      r"religion|national anthem|anthem|motto|area|size|founder|national flower|national animal)"
+                      r"\s+(?:of|in|for)\s+(?:the\s+)?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' -]*)", re.I)
+REL_WORDS = {"capital city": "capital", "head of state": "head of state", "national language": "language",
+             "official language": "language", "languages": "language", "national anthem": "anthem",
+             "size": "area"}
+
+
+ENDS = set("and or but didn't did don't is was because for with please i you not who which that".split())
+PEOPLE = {"president", "prime minister", "king", "queen", "sultan", "ruler", "leader", "head of state", "founder"}
+
+
+def relation(q):
+    """(relation word, subject) of "the capital of Malaysia" style questions, or None."""
+    m = RELATION.search(q)
+    if not m:
+        return None
+    subj = []                                  # "Malaysia didn't ask for a footballer" -> Malaysia
+    for w in m.group(2).split()[:4]:
+        if w.lower() in ENDS:
+            break
+        if w.lower() not in QWORDS:
+            subj.append(w)
+    subj = " ".join(subj).strip(" -'")
+    rel = m.group(1).lower()
+    return (REL_WORDS.get(rel, rel), subj) if subj else None
+
+
+def _relation_answer(a, rel, subj):
+    """{title, text, ...} from the subject's own article: the sentence that states the relation."""
+    for v in dict.fromkeys([subj.replace(" ", "_"), subj.title().replace(" ", "_"), "The_" + subj.title().replace(" ", "_")]):
+        if not a.has_entry_by_path(v):
+            continue
+        try:
+            title, raw = _resolve(a, v, subj)
+        except Exception:                          # noqa: BLE001
+            continue
+        sents = _lead_sentences(raw)
+        if not sents or "may refer to" in sents[0]:
+            continue
+        key = rel.split()[0][:6].lower()
+        hits = [x for x in sents if (re.search(rf"\b{key}\b", x.lower()) if rel in PEOPLE else key in x.lower())]
+        if rel in PEOPLE:                          # it must name someone: "The head of government is
+            hits = [x for x in hits                # the prime minister." answers nothing
+                    if re.search(r"(?<!^)\b[A-Z][a-z]+ [A-Z][a-z]+", x.split(rel.split()[-1], 1)[-1])]
+        if not hits:
+            return None                            # the lead does not say: let the model answer
+        rest = [x for x in sents if x != hits[0]]
+        return {"title": title, "text": hits[0], "sents": rest, "next": 0}
+    return None
 
 
 def _candidates(q):
@@ -284,6 +349,8 @@ def _candidates(q):
     out = []
     m = re.search(r"\bhistory of (?:the )?([A-Za-zÀ-ÿ' -]+)", q, re.I)
     x = m and " ".join(w for w in m.group(1).split() if w.lower() not in QWORDS)
+    if x and x.lower() in ALIAS:
+        x = ALIAS[x.lower()]
     if not x and re.search(r"\bhistor(y|ical)\b", q, re.I) and content:
         x = " ".join(content)                      # "some history information about Japan" (24 Oct)
     if x:
@@ -330,7 +397,9 @@ def _resolve(a, path, q):
                 st = {_stem(w) for w in re.findall(r"[a-z]+", (html.unescape(_TAG.sub(" ", li)) + " " +
                                                              href.replace("_", " ")).lower())}
                 # the question's words count most, context breaks ties, Wikipedia lists the main meaning first
-                sc = 3 * len(qs & st) + len(ctx & st) + (4 if k == 0 else 0)
+                # ARC's own subject (Malacca, Malay, sultan...) beats the first meaning: "Parameswara"
+                # is first a Hindu epithet, but ARC means the founder of Malacca (24 Oct)
+                sc = 3 * len(qs & st) + 2 * len(ctx & st) + (1.5 if k == 0 else 0)
                 if sc > best_s:
                     best, best_s = href, sc
             if best and a.has_entry_by_path(best):
@@ -363,6 +432,12 @@ def summary(q, lang="en", n=2):
     if not arcs:
         return None
     a = arcs[0]
+    rel = relation(q)
+    if rel:
+        out = _relation_answer(a, *rel)
+        if out:
+            out["ms"] = round((time.time() - t0) * 1000)
+        return out                                 # None: the model answers (it knows capitals)
     paths, preferred = [], set()
     for cand in _candidates(q):
         forms = [cand.replace(" ", "_"), cand.title().replace(" ", "_"), cand.capitalize().replace(" ", "_")]
@@ -374,7 +449,7 @@ def summary(q, lang="en", n=2):
                     preferred.add(v)               # asked for the history: that article wins
         if len(paths) >= 3:
             break
-    words = " ".join(w for w in re.findall(r"\w+", q) if w.lower() not in QWORDS)
+    words = " ".join(topic_words(q))
     if words:
         from libzim.search import Query, Searcher
         paths += [h for h in Searcher(a).search(Query().set_query(words)).getResults(0, 3) if h not in paths]
@@ -393,10 +468,36 @@ def summary(q, lang="en", n=2):
             len(qs & {_stem(w) for w in re.findall(r"[a-z]+", title.lower())}) - 0.1 * rank
         if re.search(r"\((film|song|album|TV|band|novel|video game|soundtrack)", title):
             score -= 2                             # the thing itself, not a film named after it
-        if "disambiguation" in title.lower() or "may refer to" in " ".join(sents[:1]):
-            continue                               # a list of meanings is never the answer
+        if "disambiguation" in title.lower() or "may refer to" in " ".join(sents[:1]) or \
+                re.search(r"\bis an? (common |\w+ )*(surname|given name|family name)\b", sents[0]):
+            continue                               # a list of meanings (or of people named Strauss) is never it
         if path in preferred:
             score += 5
+        # ARC talks about heritage: a close call goes to the composer, not the company (Strauss)
+        score += min(2.0, 0.5 * len({_stem(w) for w in CONTEXT} & {_stem(w) for w in re.findall(r"[a-z]+", lead)}))
+        if re.match(r"\W*who\b", q.strip(), re.I) and not re.search(
+                r"\b(born|was an? |is an? \w*\s*(composer|writer|king|queen|ruler|poet|artist|warrior|leader|"
+                r"politician|scientist|inventor|musician|singer|actor|emperor|sultan|hero|figure|person|man|woman))|"
+                r"\d{3,4}\s*[–-]\s*\d{2,4}", " ".join(sents[:2])):
+            score -= 2                             # "who" wants a person
+        # the title must be about what was asked: "See Kok Luen" (a footballer) for "I meant to see
+        # what is the capital of Malaysia", "Japan Japan" (a film) for "Japan. Japan." (24 Oct)
+        named = _strip_parens(title).lower() + " " + path.replace("_", " ").lower()   # Keris -> "Kris"
+        tstems = {_stem(w) for w in re.findall(r"[a-z]+", named) if w not in QWORDS}
+        topic = {_stem(w.lower()) for w in topic_words(q)}
+        shared, extra = len(tstems & topic), len(tstems - topic - {_stem(w) for w in CONTEXT})
+        if path not in preferred:              # "History of the United States" for America: chosen on purpose
+            if not shared:
+                continue
+            if extra > shared + 1:             # "Wolfgang Amadeus Mozart" is fine for Mozart
+                score -= 2
+        plain = re.sub(r"^the ", "", _strip_parens(title).lower())
+        asked = " ".join(topic_words(q)).lower()
+        if asked in (plain, path.replace("_", " ").lower()):   # by its name, even if redirected (Keris)
+            score += 2                             # exactly what was asked: "Japan" -> Japan
+        qual = re.search(r"\(([^)]*)\)", title)
+        if qual and not {_stem(w) for w in re.findall(r"[a-z]+", qual.group(1).lower())} & qs:
+            score -= 2.5                           # "Blue Danube (nuclear weapon)": a namesake, not it
         if best is None or score > best[0]:
             best = (score, title, sents)
     if best is None or best[0] <= 0:

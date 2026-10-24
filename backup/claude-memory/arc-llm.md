@@ -56,3 +56,20 @@ Barge-in details:
 - Verified: no false triggers on pure echo. NOT verified: detecting a real person (an injected recording through the same speaker was buried). Tune from the run's "barge" events after the user tests.
 
 Also: voices are warmed at start (the first use of each mood voice was 0.7-1.4 s). The first sentence after the opener is "urgent" (made while the LLM writes); the A/B showed median pause 1.67 vs 2.58 s.
+
+**24 Oct, echo fix (supersedes the XVF-reference idea):** the XMOS tuning guide says the XVF3800's echo canceller needs the echo within 40 samples of the reference, at a constant delay. HDMI can't meet that: the reference muted the owner and let echo bursts through. Now `speaker.echo_cancel(sink)` loads PulseAudio's WebRTC module-echo-cancel at runtime:
+- the chosen mic channel goes through a remap-source (arc_mic) into arc_ec_src; ARC plays into arc_ec_sink, which forwards to HDMI;
+- 32 kHz; NS, AGC and analog gain off;
+- unloaded by talk's exit and `iro arc stop`.
+Measured: ARC alone transcribes as "" through it (word-for-word on the plain mic); barge candidates went from 1 per 2 s to 1 per 34 s.
+Injecting a "person" via the same speaker is NOT a valid test; it needs a real voice.
+Fallback if still poor: a speaker on the reSpeaker's 3.5 mm jack, so its hardware AEC works as designed.
+
+**24 Oct, session 153737 fixes:**
+- Barge-in with the canceller: no loudness test, 4 frames of VAD speech start a check, an early stop-word look at 0.7 s; each check is saved as barge_NNN.wav in the run.
+- A sherpa KWS 3.3M model was tried and missed the real "Hold on" (removed).
+- Stop phrases and empty turns ("I said.") are never answered. Default volume 0.8.
+- Wiki: `relation()` answers "capital/population/PM of X" from X's article (people relations must name someone, else the LLM answers).
+- topic words are de-duplicated; meant/see/said/asked are QWORDS; ALIAS america -> United States; CONTEXT now includes heritage words.
+- The title must share a stem with the topic (the redirect path counts); namesake "(...)" and surname pages are penalised; "who" prefers people; "tell me more about X" continues the same article.
+- A 20-question check is all sensible, at ~110 ms each.
