@@ -35,3 +35,24 @@ Design (built 23 Oct): llama.cpp `llama-server` (~/llama.cpp, CUDA sm_87), model
 - Requests ("could you wait") are no Wikipedia lookup.
 
 Remaining: one 1.3-2.9 s pause after the opener in LLM replies. This is GPU-bound: the total work exceeds the speech length. The Q4 talker crashes CUDA (illegal memory access).
+
+**24 Oct, conversation features (iro/convo.py, the user asked for exactly 10):**
+1. Barge-in, on by default (`--no-barge-in` turns it off).
+2. Ducking while it checks.
+3. Stop words.
+4. "go on" (`voice.unsaid`).
+5. "say that again" (replays the last reply wav).
+6. louder/softer (voice.yaml `volume`).
+7. shorter/longer (voice.yaml `reply_words`).
+8. A heard-you tick (voice.yaml `earcon`).
+9. Filler/noise turns ignored.
+10. Owner-only sleep; ARC's name wakes it.
+
+Owner voice notes ("ARC, take a note: ...") go to arc/owner_notes.md (`iro arc notes`); the user wants to give ARC orders by voice, so read these notes at the start of sessions.
+
+Barge-in details:
+- No AEC on the HDMI speaker, so ARC's audio is also sent to the XVF3800 sink as the echo-cancel reference (voice.yaml `aec_reference`). This gave -12 dB echo and stopped the ducking flicker.
+- A candidate needs the VAD plus loudness above the expected echo, then a transcript of words ARC is not saying (`convo.judge`), then an echo-voiceprint veto (`Ears.ECHO_SIM` 0.62; echo-vs-echo sims 0.6-0.9).
+- Verified: no false triggers on pure echo. NOT verified: detecting a real person (an injected recording through the same speaker was buried). Tune from the run's "barge" events after the user tests.
+
+Also: voices are warmed at start (the first use of each mood voice was 0.7-1.4 s). The first sentence after the opener is "urgent" (made while the LLM writes); the A/B showed median pause 1.67 vs 2.58 s.
