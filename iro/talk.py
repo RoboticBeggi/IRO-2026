@@ -1,9 +1,8 @@
 """iro arc talk: speak with ARC. The mic array hears you, Whisper writes it down, ARC answers, and
 ARC's chosen Qwen voice speaks it while the rest is still being written.
 
-    iro arc talk [--robot] [--barge-in]    --robot: skills move the arm; --barge-in: you can interrupt
-                                           (only with the speaker on the array's 3.5 mm jack, so its
-                                           echo cancelling removes ARC's own voice)
+    iro arc talk [--robot] [--no-barge-in]    --robot: skills move the arm; you can interrupt ARC by
+                                              talking (iro/convo.py: the 10 conversation features)
 
 Pipeline (all on the Jetson, offline), with the 24 Oct upgrades (PLAN.md "Voice upgrades"):
   hear     reSpeaker XVF3800 through PulseAudio, Silero VAD finds each sentence; a sentence that ends
@@ -94,6 +93,7 @@ def stt_lang():
 
 MOONSHINE = Path.home() / "voice-models" / "sherpa-onnx-moonshine-base-en-int8"
 _moon = None
+_STT_LOCK = threading.Lock()
 
 
 def stt_engine():
@@ -130,10 +130,11 @@ def transcribe(pcm16, lang=None):
     from iro.names import fix
     if stt_engine() == "moonshine":
         start_whisper()
-        st = _moon.create_stream()
-        st.accept_waveform(RATE, np.asarray(pcm16, np.float32) / 32768.0)
-        _moon.decode_stream(st)
-        text = st.result.text.strip()
+        with _STT_LOCK:                            # the barge-in judge transcribes from its own thread
+            st = _moon.create_stream()
+            st.accept_waveform(RATE, np.asarray(pcm16, np.float32) / 32768.0)
+            _moon.decode_stream(st)
+            text = st.result.text.strip()
         if not text or PHANTOM.match(text) and len(pcm16) < RATE * 0.8:
             return "", "en"
         text = fix(text)
@@ -241,6 +242,11 @@ class Voice:
                     r.read()
             except Exception:                      # noqa: BLE001 - only a warm-up
                 pass
+        self.volume = float(c.get("volume", 1.0))   # "louder" / "softer" (convo feature 6)
+        self.duck_gain = 1.0                       # dips while someone may be talking over ARC (feature 2)
+        self.earcon_on = bool(c.get("earcon", True))
+        self.turn = 0                              # +1 at every interruption: that reply's text is dropped
+        self.current, self.said_parts, self.unsaid = "", [], []
         self.cache = {}
         self.cache_dir = Path.home() / "voice-samples" / "cache" / self.voice
         self.text_q, self.audio_q = queue.Queue(), queue.Queue()
@@ -260,7 +266,8 @@ class Voice:
         self.gpu_free = threading.Event()
         self.gpu_free.set()
         self.wavs = []
-        self.player = None
+        self.player = self.ref_player = None
+        self.aec_ref = bool(c.get("aec_reference", True))
         threading.Thread(target=self._synth, daemon=True).start()
         threading.Thread(target=self._play, daemon=True).start()
         self.precache([(line, None) for line in lines])   # common lines (#6); also warms the voice (#9)
@@ -333,11 +340,12 @@ class Voice:
             text, lang, mood, urgent = self.text_q.get()
             try:
                 if (text, mood) in self.cache:
+                    self.audio_q.put(("part", 0.0, text))
                     self.audio_q.put(self.cache[(text, mood)])
                 else:
                     if not urgent:
                         self.gpu_free.wait(timeout=20)
-                    self.audio_q.put(("part", self._est(text)))
+                    self.audio_q.put(("part", self._est(text), text))
                     t0, made = time.time(), 0
                     head = True                    # trim the silence the voice adds at the start
                     tail = np.zeros(0, np.int16)
@@ -389,16 +397,37 @@ class Voice:
             dev = self._sink()
             self.player = subprocess.Popen(["pacat", "--raw", "--format=s16le", f"--rate={OUT_RATE}", "--channels=1",
                                             f"--device={dev}", "--latency-msec=60"], stdin=subprocess.PIPE)
+        # the same sound to the mic array as the echo canceller's reference: it then removes ARC's own
+        # voice from what it hears (24 Oct: -12 dB on the HDMI speaker's echo), so you can talk over ARC.
+        # Nothing needs to be plugged into the array's jack.
+        if self.aec_ref and (self.ref_player is None or self.ref_player.poll() is not None):
+            out = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True).stdout
+            ref = next((ln.split("\t")[1] for ln in out.splitlines() if "XVF3800" in ln), None)
+            if ref and ref != dev:
+                self.ref_player = subprocess.Popen(["pacat", "--raw", "--format=s16le", f"--rate={OUT_RATE}",
+                                                    "--channels=1", f"--device={ref}", "--latency-msec=60"],
+                                                   stdin=subprocess.PIPE)
+            else:
+                self.aec_ref = False
 
     def _write(self, a):
         self._ensure_player()
         now = time.time()
         self.play_until = max(self.play_until, now) + len(a) / OUT_RATE
+        g = self.volume * self.duck_gain
+        if g != 1.0:
+            a = np.clip(a.astype(np.float32) * g, -32767, 32767).astype(np.int16)
         try:
             self.player.stdin.write(a.tobytes())
             self.player.stdin.flush()
         except BrokenPipeError:
             self.player = None
+        if self.ref_player:
+            try:
+                self.ref_player.stdin.write(a.tobytes())
+                self.ref_player.stdin.flush()
+            except BrokenPipeError:
+                self.ref_player = None
 
     def _hold_for(self, est_s):
         """Seconds of audio to gather before a part starts (jitter buffer). The voice is slower than
@@ -418,6 +447,7 @@ class Voice:
                 continue
             if isinstance(a, tuple):               # a new part begins: how much to buffer first
                 hold = self._hold_for(a[1])
+                self.current = a[2]
                 continue
             if hold:
                 if a is not None:
@@ -435,6 +465,9 @@ class Voice:
                 held, hold = [a], 0.5              # it is one short pause, not a stutter
                 continue
             if a is None:                          # end of a part: a short natural breath
+                if self.current:
+                    self.said_parts = (self.said_parts + [self.current])[-6:]
+                    self.current = ""
                 if got:
                     self.wavs.append(np.concatenate(got))
                     got = []
@@ -464,25 +497,75 @@ class Voice:
         longest = max([b[0] - e for b, e in zip(tl[1:], ends)] + [0.0])
         return out, longest
 
+    def duck(self, gain):
+        self.duck_gain = gain
+
+    def level_now(self, latency=0.05, reverb=0.35):
+        """Loudness (RMS, after volume) of the echo to expect now: the loudest of what the speaker
+        played in the last `reverb` seconds (the room keeps ringing after each word: with the instant
+        level only, ARC's own echo looked like someone talking over it, 24 Oct)."""
+        t1 = time.time() - latency
+        t0 = t1 - reverb
+        best = 0.0
+        for st, d, a in reversed(self.timeline[-40:]):
+            if st + d < t0:
+                break
+            i0, i1 = int(max(0.0, t0 - st) * OUT_RATE), int(max(0.0, min(d, t1 - st)) * OUT_RATE)
+            x = a[i0:i1].astype(np.float32)
+            if len(x) >= 480:
+                n = len(x) // 480 * 480
+                best = max(best, float(np.sqrt((x[:n].reshape(-1, 480) ** 2).mean(1)).max()))
+        return best * self.volume * self.duck_gain
+
+    def recent_spoken(self):
+        """The sentences that could be echoing in the mic now (the last two said, this one, the next)."""
+        nxt = [x[0] for x in list(self.text_q.queue)[:1]]
+        return " ".join(self.said_parts[-2:] + [self.current] + nxt)
+
+    def play_pcm(self, pcm, label=""):
+        """Play ready audio (a replay, the tick) through the same stream, in turn with speech."""
+        self.audio_q.put(("part", 0.0, label))
+        self.audio_q.put(pcm)
+        self.audio_q.put(None)
+
+    def earcon(self):
+        """A soft short tick: "I heard you" (feature 8)."""
+        if not self.earcon_on:
+            return
+        t = np.arange(int(OUT_RATE * 0.05)) / OUT_RATE
+        tick = 1800 * np.sin(2 * np.pi * 1320 * t) * np.exp(-t * 90)
+        self.play_pcm(tick.astype(np.int16))
+
     def speaking(self, tail=0.3):
         with self.lock:
             busy = self.pending > 0
         return busy or not self.audio_q.empty() or time.time() < self.play_until + tail
 
     def stop(self):
-        """Barge-in: drop everything queued and stop the sound now (#21)."""
+        """Barge-in: drop everything queued and stop the sound now (#21). What was not said yet is
+        kept in .unsaid, so "go on" can carry on from the sentence that was cut."""
         self.stop_flag.set()
-        for q in (self.text_q, self.audio_q):
+        self.turn += 1
+        left = [self.current] if self.current else []
+        for q in (self.audio_q, self.text_q):
             try:
                 while True:
-                    q.get_nowait()
+                    x = q.get_nowait()
+                    if q is self.text_q:
+                        left.append(x[0])
+                    elif isinstance(x, tuple) and x[2]:
+                        left.append(x[2])
             except queue.Empty:
                 pass
+        self.unsaid = [t for i, t in enumerate(left) if t and t not in left[:i]]
+        self.current = ""
+        self.duck_gain = 1.0
         with self.lock:
             self.pending, self.queued_s = 0, 0.0
-        if self.player:
-            self.player.kill()
-            self.player = None
+        for pl in (self.player, self.ref_player):
+            if pl:
+                pl.kill()
+        self.player = self.ref_player = None
         self.play_until = 0.0
         self.gpu_free.set()
         time.sleep(0.05)
@@ -498,9 +581,11 @@ class Splitter:
 
     MAX_WORDS = 35                                 # the 2B ignores "about 35 words": spoke 16.8 s (24 Oct)
 
-    def __init__(self, voice, lang, mood_ref):
+    def __init__(self, voice, lang, mood_ref, max_words=None):
         from iro.arc import all_openers
         self.voice, self.lang, self.mood = voice, lang, mood_ref
+        self.max_words = max_words or self.MAX_WORDS
+        self.turn = voice.turn                     # interrupted (turn changes): the rest is not said
         self.buf, self.first_done, self.opener_done = "", False, False
         self.openers = sorted(all_openers(), key=len, reverse=True)
         self.said_words, self.done, self.model_done = 0, False, False
@@ -508,15 +593,17 @@ class Splitter:
         voice.gpu_free.clear()                     # the LLM may be about to write: new speech waits (see Voice)
 
     def _say(self, text):
+        if self.voice.turn != self.turn:
+            self.done = True
         if self.done:
             return
         words = len(text.split())
-        if self.said_words + words > self.MAX_WORDS and self.said_words:
+        if self.said_words + words > self.max_words and self.said_words:
             cut = re.split(r"(?<=[.!?])\s+", text)          # finish the sentence that crosses the limit
             keep = []
             for x in cut:
                 keep.append(x)
-                if self.said_words + len(" ".join(keep).split()) >= self.MAX_WORDS:
+                if self.said_words + len(" ".join(keep).split()) >= self.max_words:
                     break
             text, self.done = " ".join(keep), True
         self.said_words += len(text.split())
@@ -551,6 +638,8 @@ class Splitter:
                 time.sleep(0.05)
             self.voice.gpu_free.clear()
             self.model_done = False
+        if self.voice.turn != self.turn:           # interrupted: stop the model too
+            self.done = True
         self._feed(s)
         return not self.done
 
@@ -591,38 +680,135 @@ class Splitter:
 
 class Ears:
     """The array's chosen channel through Silero VAD, in a background thread: finished sentences go
-    to a queue, so the loop can wait a little for the rest of an unfinished one (#20)."""
+    to a queue, so the loop can wait a little for the rest of an unfinished one (#20).
 
-    def __init__(self, voice, barge_in=False):
+    While ARC talks it keeps listening (barge_in, convo features 1-3). The HDMI speaker's sound comes
+    back into the mic, so a possible interruption is first only a CANDIDATE: speech (a stricter VAD)
+    clearly louder than ARC's own echo should be (the echo level is learned all the time from what is
+    playing). ARC's voice dips at once (ducking); ~1 s of it is transcribed, and only words that ARC
+    is NOT saying right now make it an interruption (iro.convo.judge). Then ARC stops, and what you
+    said (from the start) becomes your next turn. "Stop" / "wait" just stop it."""
+
+    FRAME = 512                                    # 32 ms, Silero's window
+    EXCESS = 2.2                                   # mic this many times louder than the expected echo
+    HOT_FRAMES = 6                                 # ~0.2 s of loud speech: a candidate
+    DECIDE_S = 1.1                                 # how much is heard before judging
+
+    ECHO_SIM = 0.62                                # this close to ARC's own echo voiceprint = ARC itself
+
+    def __init__(self, voice, barge_in=True, log=None, embedder=None):
         from iro.speaker import Vad, stream
-        self.voice, self.barge_in = voice, barge_in
+        self.voice, self.barge_in, self.log = voice, barge_in, log or (lambda *a, **k: None)
+        self.emb = embedder                        # speaker embeddings (iro.speaker.Ears), or None
+        self.echo_prints, self.echo_buf, self.echo_busy = [], [], False
         self.proc = stream()                       # through PulseAudio (it holds the sound card)
         self.vad = Vad()
+        self.bvad = Vad(threshold=0.6, min_silence=0.25, min_speech=0.2)
         self.q = queue.Queue()
         self.run = True
+        self.pre = []                              # the last ~0.5 s (the start of an interruption)
+        self.ratio = []                            # mic level / playing level while ARC talks
+        self.cand, self.hot, self.cool = None, 0, 0.0
+        self.verdict, self.deciding = None, False
+        self.stopped = threading.Event()           # set when "stop" / an interruption stopped ARC
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
-        frame = 512                                # 32 ms, Silero's window
-        heard_over = 0
         while self.run:
-            raw = self.proc.stdout.read(frame * 2)
+            raw = self.proc.stdout.read(self.FRAME * 2)
             if not raw:
                 return
             a = np.frombuffer(raw, np.int16)
-            if self.voice.speaking():
-                if not self.barge_in:              # no echo cancelling: do not listen to ourselves
+            if self.voice.speaking() or self.cand is not None:
+                if not self.barge_in:              # do not listen to ourselves
                     self.vad.reset()
                     continue
-                self.vad.feed(a)                   # with echo cancelling: the visitor may interrupt
-                heard_over = heard_over + 1 if self.vad.speaking() else 0
-                if heard_over >= 10:               # ~0.3 s of speech over ARC: stop talking (#21)
-                    self.voice.stop()
-                    heard_over = 0
+                self._over(a)
                 continue
             for seg in self.vad.feed(a):
                 if len(seg) > RATE * 0.4:
                     self.q.put(seg)
+
+    def _over(self, a):
+        """One frame heard while ARC talks."""
+        m = float(np.sqrt(np.mean(a.astype(np.float32) ** 2)))
+        p = self.voice.level_now()
+        self.bvad.feed(a)
+        self.pre = (self.pre + [a])[-16:]
+        if self.cand is None:
+            if p > 400:                            # learn how loud ARC's own echo is, and how it sounds
+                self.ratio = (self.ratio + [m / p])[-300:]
+                self.echo_buf.append(a)
+                if len(self.echo_buf) >= 47 and self.emb and not self.echo_busy:     # every ~1.5 s
+                    self.echo_busy = True
+                    threading.Thread(target=self._learn_echo, args=(np.concatenate(self.echo_buf),),
+                                     daemon=True).start()
+                    self.echo_buf = []
+                elif len(self.echo_buf) >= 47:
+                    self.echo_buf = []
+            k = float(np.percentile(self.ratio, 40)) if len(self.ratio) > 30 else 0.6
+            excess = m / (k * p + 150)             # 150: the room's own noise
+            if time.time() < self.cool:
+                return
+            self.hot = self.hot + 1 if (self.bvad.speaking() and excess > self.EXCESS) else 0
+            if self.hot >= self.HOT_FRAMES:
+                self.cand, self.hot = list(self.pre), 0
+                self.voice.duck(0.35)              # polite: lower the voice while finding out
+                self.log("barge", event="candidate", excess=round(excess, 1))
+            return
+        self.cand.append(a)
+        if self.verdict:
+            self._apply(self.verdict)
+        elif not self.deciding and len(self.cand) * self.FRAME / RATE >= self.DECIDE_S:
+            self.deciding = True
+            pcm, spoken = np.concatenate(self.cand), self.voice.recent_spoken()
+            threading.Thread(target=self._decide, args=(pcm, spoken), daemon=True).start()
+
+    def _learn_echo(self, pcm):
+        try:
+            self.echo_prints = (self.echo_prints + [self.emb.embed(pcm)])[-12:]
+        finally:
+            self.echo_busy = False
+
+    def echo_sim(self, pcm):
+        """How much this sounds like ARC's own voice as the mic hears it (0..1), or None."""
+        if not self.emb or len(self.echo_prints) < 2:
+            return None
+        return float(np.max(np.array(self.echo_prints) @ self.emb.embed(pcm)))
+
+    def _decide(self, pcm, spoken):
+        from iro.convo import judge
+        text, _ = transcribe(pcm)
+        v = judge(text, spoken)
+        sim = self.echo_sim(pcm)
+        if v == "interrupt" and sim is not None and sim >= self.ECHO_SIM:
+            v = "echo"                             # new-looking words, but ARC's own voice: misheard echo
+        self.log("barge", event=v, heard=text, echo_sim=sim and round(sim, 2), arc_was_saying=spoken[:120])
+        self.verdict = v
+
+    def _apply(self, v):
+        heard = self.cand
+        self.cand, self.verdict, self.deciding = None, None, False
+        if v == "echo":                            # only ARC's echo or noise: carry on
+            self.voice.duck(1.0)
+            self.cool = time.time() + 1.0
+            if not self.voice.speaking():          # ARC ended meanwhile: what was heard is a normal turn
+                self.vad.reset()
+                for x in heard:
+                    self._feed_normal(x)
+            return
+        self.voice.stop()
+        self.stopped.set()
+        self.vad.reset()
+        self.bvad.reset()
+        if v == "interrupt":                       # your words so far start your next turn
+            for x in heard:
+                self._feed_normal(x)
+
+    def _feed_normal(self, a):
+        for seg in self.vad.feed(a):
+            if len(seg) > RATE * 0.4:
+                self.q.put(seg)
 
     def next(self, timeout=None):
         return self.q.get(timeout=timeout)
@@ -645,7 +831,7 @@ class Ring:
             if state == "listening":
                 self.m.led_doa()                   # points at the voice
             else:
-                self.m.led_color({"thinking": 0x8000FF, "speaking": 0x0060FF}[state])
+                self.m.led_color({"thinking": 0x8000FF, "speaking": 0x0060FF, "asleep": 0x080808}[state])
         except Exception:                          # noqa: BLE001 - the ring is a nicety
             pass
 
@@ -675,7 +861,8 @@ def main():
     start(quiet=True)
     start_whisper()
     greet = topic()["greeting"]["en"]
-    voice = Voice(lines=[greet])
+    from iro import convo
+    voice = Voice(lines=[greet] + list(convo.LINES.values()))
     from iro.arc import all_openers
     voice.precache([(o, m) for o in all_openers() for m in [None] + sorted(voice.moods)])
     # warm everything once (#8, #9): Wikipedia's index from disk, Whisper, ARC's prompt cache
@@ -695,8 +882,12 @@ def main():
         mic = None
     ring = Ring(mic)
     body = Body(robot="--robot" in a)
-    ears = Ears(voice, barge_in="--barge-in" in a)
     owner_id = Owner()
+    ears = Ears(voice, barge_in="--no-barge-in" not in a, log=r.log, embedder=owner_id.ears)
+    from iro.voice import cfg as voice_cfg
+    from iro.voice import save_cfg
+    reply_words = int(voice_cfg().get("reply_words", Splitter.MAX_WORDS))
+    asleep, last_reply, last_mood = False, None, None
     pool = ThreadPoolExecutor(1)
     if not owner_id.ok:
         print("(no owner voice yet: everyone is a visitor. Teach it yours: iro voice enroll)")
@@ -708,7 +899,10 @@ def main():
     k, last = 0, None
 
     def keep_reply():                              # the reply as the listener heard it, silences and all
+        nonlocal last_reply
         pcm, longest = voice.heard_as(last[1])
+        if len(pcm) > OUT_RATE * 0.5:
+            last_reply = pcm                       # for "say that again"
         with wave.open(str(r.dir / f"reply_{last[0]:03d}.wav"), "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
@@ -741,8 +935,61 @@ def main():
                 who = pool.submit(owner_id.is_owner, u)
             is_owner, score = who.result()
             t_heard = time.time() - t0
-            if not text or len(text) < 2 or text.startswith("["):
+            if not text or len(text) < 2 or text.startswith("[") or convo.is_noise(text):
+                if text:
+                    r.log("ignored", heard=text)   # "uh", "hmm", one stray word (feature 9)
                 continue
+            if ears.stopped.is_set():              # you just stopped ARC: "stop" itself needs no answer
+                ears.stopped.clear()
+                if convo.is_stop(text):
+                    r.log("stopped", heard=text)
+                    continue
+            if asleep:                             # feature 10: only its name wakes it
+                if not convo.WAKE.search(text):
+                    continue
+                asleep = False
+                ring.show("listening")
+                voice.say(convo.LINES["wake_owner" if is_owner else "wake"])
+                r.log("wake", heard=text)
+                rest = convo.strip_name(text)
+                if len(convo.words(rest)) < 3 or convo.WAKE.fullmatch(rest.strip(" .,!?")):
+                    continue
+                text = rest
+            kind, arg = convo.command(text, is_owner)
+            if kind:
+                r.log("command", heard=text, kind=kind, arg=arg)
+                print(f"\n{'sir' if is_owner else 'visitor'}: {text}   [{kind}]")
+                if kind == "repeat":
+                    voice.play_pcm(last_reply, "(again)") if last_reply is not None else \
+                        voice.say(convo.LINES["no_repeat"])
+                elif kind == "go_on":
+                    if voice.unsaid:
+                        for t in voice.unsaid:
+                            voice.say(t, mood=last_mood)
+                        voice.unsaid = []
+                    else:
+                        voice.say(convo.LINES["no_go_on"])
+                elif kind in ("louder", "softer"):
+                    voice.volume = float(np.clip(voice.volume * (1.3 if kind == "louder" else 0.75), 0.3, 2.5))
+                    save_cfg(volume=round(voice.volume, 2))
+                    voice.say(convo.LINES[kind])
+                elif kind in ("shorter", "longer"):
+                    reply_words = 20 if kind == "shorter" else 60
+                    save_cfg(reply_words=reply_words)
+                    voice.say(convo.LINES[kind])
+                elif kind == "sleep":
+                    voice.say(convo.LINES["sleep"])
+                    asleep = True
+                    while voice.speaking():
+                        time.sleep(0.05)
+                    ring.show("asleep")
+                elif kind == "note":
+                    convo.add_note(arg or text)
+                    voice.say(convo.LINES["note"])
+                continue
+            text = convo.strip_name(text)
+            voice.earcon()                         # "heard you" (feature 8)
+            voice.unsaid = []                      # a new reply: "go on" now refers to this one
             lang = LANGS.get(lang, "en")
             if is_owner:
                 owner_id.learn(u, score)
@@ -757,7 +1004,7 @@ def main():
             # (24 Oct: it only made the answer longer). Kept for slow paths: none at the moment.
             ack = False
             mood = {"mood": None}
-            split = Splitter(voice, LANG_NAMES.get(lang, "English"), mood)
+            split = Splitter(voice, LANG_NAMES.get(lang, "English"), mood, max_words=reply_words)
             t_think = time.time()
 
             def on_text(s):
@@ -770,6 +1017,7 @@ def main():
             replies = respond(body, hist, text, lang, on_text=on_text, owner=is_owner,
                               on_mood=lambda m: mood.update(mood=m))
             split.flush()
+            last_mood = mood["mood"]
             if mood["mood"]:
                 print(f"     (mood: {mood['mood']})", end="")
             while voice.first_audio is None and voice.speaking():

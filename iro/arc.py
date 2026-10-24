@@ -10,6 +10,7 @@
     iro arc check                    knowledge cards still to be verified by the team
     iro arc models                   the models in config/arc.yaml and which ones are downloaded
     iro arc stop                     stop all of ARC's servers: model, Whisper, voice (frees ~3 GB)
+    iro arc notes                    the orders the owner gave by voice ("ARC, take a note: ...")
 
 How it works: llama.cpp's llama-server runs the model on the GPU (localhost only). ARC's system
 prompt = persona + the topic's role + ALL its knowledge cards; it is the same for every question,
@@ -634,6 +635,9 @@ def main():
     if sub == "talk":
         from iro.talk import main as talk_main
         return talk_main()
+    if sub == "notes":                             # what the owner told ARC to note
+        from iro.convo import cmd_notes
+        return cmd_notes()
     if sub == "routine":
         from iro.skills import main as skills_main
         sys.argv = [sys.argv[0]] + a[1:]
