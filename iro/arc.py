@@ -121,7 +121,11 @@ def needs_lookup(q):
     # Wait, an album by ZOX", "Why did you cut off the audio?" as Pink Floyd's "The Final Cut" (24 Oct).
     # Asking to be told something still counts ("could you give me some history about Japan").
     request = re.search(r"\byou\b", q, re.I) and not re.search(
-        r"\b(tell|explain|describe|teach|give me|know|information|info|facts?|story|stories)\b", q, re.I)
+        r"\b(tell|explain|describe|teach|give me|know|information|info|facts?|story|stories|understand|"
+        r"how|what|who|when|where|which)\b", q, re.I)
+    if re.match(r"\W*why\b", q, re.I) or MATH.search(q) or \
+            re.search(r"\bwhat do you think\b|\byour (opinion|favou?rite)\b|\bdo you (like|love|enjoy)\b", q, re.I):
+        return False                               # explanations: the model; sums: worked out (see respond)
     if not cfg().get("wiki") or (card_topic(q) and not history) or small_talk(q) or re.search(about_arc, q, re.I) \
             or (request and not history):
         return False
@@ -323,8 +327,7 @@ def _ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wik
 OPENERS = {
     "visitor": ["Ah,", "Well,", "Oh,", "Hmm,", "Hello!", "Hello and welcome!", "Splendid!", "Of course!",
                 "Wonderful!", "I see.", "Ah, good question.", "Oh, I'm sorry to hear that."],
-    "owner": ["Certainly, sir.", "Right, sir.", "Well, sir,", "Ah, sir,", "Oh dear, sir.", "Of course, sir.",
-              "Splendid, sir!", "Hmm, sir,", "Good to hear you, sir.", "As you wish, sir."],
+    "owner": ["Certainly, sir.", "Right, sir.", "Of course, sir.", "As you wish, sir."],
 }
 
 
@@ -351,10 +354,8 @@ def _grammar(text, openers=None):
 
 
 # Only in owner turns (23 Oct: with both modes in the persona, the 2B model called visitors "sir").
-OWNER = ("Speaker: your OWNER, the student who built you (recognised by his voice). OWNER MODE for this reply: "
-         "you are his loyal but cheeky robot butler. Call him sir. Be short and straight to the point, dry and "
-         "witty, a little sarcastic; an affectionate roast now and then (his sleep, his code, how hard he works "
-         "you), never hurtful. Never repeat yourself. Orders (perform, look, show, stop) you simply do")
+OWNER = ("Speaker: your OWNER, the student who built you (recognised by voice). Call him sir. Be brief, plain "
+         "and direct: answer or do what he asks, nothing else; no jokes, no teasing, no chatter. Never refuse")
 VISITOR = "Speaker: a visitor (be the warm storyteller; do not call them sir)"
 # Each action is offered only when the visitor's words ask for it (23 Oct: the 2B model performed and
 # waved at plain questions). BM / EN / DE trigger words.
@@ -387,12 +388,23 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     sensing = next((k for k in ("look", "show") if re.search(INTENTS[k], q, re.I)), None)
     # facts (ARC Lite, 24 Oct): the Wikipedia sentence itself, spoken with a short opener. The 2B
     # model ignored a correct reference and asked "Who did you think founded Malacca?"
-    fact = None if sensing or not needs_lookup(q) else _fact(q, owner)
+    fact = None
+    sum_ = None if sensing else _math(q)
+    if sum_:
+        fact = {"text": ("Easy, sir. " if owner else "") + sum_[0].upper() + sum_[1:], "title": "(worked out)", "ms": 0}
+    elif not sensing and re.search(RANDOM, q, re.I):    # "give me a random fact (about the UK)"
+        fact = _random_fact(q, owner)
+    elif not sensing and needs_lookup(q):
+        fact = _fact(q, owner)
+    elif not sensing:                                  # a bare topic: "United Kingdom", "Mozart?"
+        fact = _bare_topic(q, owner)
+    if not fact and not sensing:
+        fact = _card_fact(q, owner) or _courtesy(q, owner)
     if fact:
         on_mood and on_mood(None)
         on_text and on_text(fact["text"])
         on_text and on_text("")                    # "" = no more model writing for now (the voice may use the GPU)
-        a = {"text": fact["text"], "act": None, "mood": None, "first_sentence": 0.0, "total": 0.0, "ttft": 0.0,
+        a = {"text": fact["text"], "act": fact.get("act"), "mood": None, "first_sentence": 0.0, "total": 0.0, "ttft": 0.0,
              "tok_s": 0, "lookup": {"title": fact["title"], "ms": fact["ms"]}}
         hist.append({"role": "assistant", "content": fact["text"]})
         out = [a]
@@ -419,7 +431,7 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     if a["act"]:
         report = body.run(a["act"])
         a["report"] = report
-        if a["act"].split(":")[0] in ("look", "show") or report.startswith("could not"):
+        if a["act"].split(":")[0] in ("look", "show") or (report.startswith("could not") and a["act"] != "bow"):
             on_text and on_text("\n")
             hist.append({"role": "user", "content": f"(Robot report: {report}. Tell the speaker in one or "
                                                     "two sentences what really happened, using ONLY this report; "
@@ -438,8 +450,8 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     return out
 
 
-FACT_OPENERS = {"visitor": ["Ah, good question.", "Well,", "Here is what I know.", "Let me tell you."],
-                "owner": ["Right, sir.", "Certainly, sir.", "Well, sir,", "As it happens, sir,"]}
+FACT_OPENERS = {"visitor": ["Well,", "Here is what I know.", "Let me tell you."],
+                "owner": ["Right, sir.", "Certainly, sir."]}
 
 
 def all_openers():
@@ -448,6 +460,113 @@ def all_openers():
 
 
 LAST_FACT = {}                                     # the article ARC last answered from (for "tell me more")
+
+
+NUM = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                  "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+_N = r"(\d+(?:\.\d+)?|" + "|".join(NUM) + r")"
+MATH = re.compile(_N + r"\s*(plus|\+|minus|-|times|x|\*|multiplied by|divided by|over|/)\s*" + _N, re.I)
+
+
+def _math(q):
+    """'What is two plus two?' -> 'Two plus two is 4.' (24 Oct: it found a jazz band called the
+    Firehouse Five Plus Two)."""
+    m = MATH.search(q)
+    if not m:
+        return None
+    val = lambda x: float(NUM.get(x.lower(), x))
+    a, op, b = val(m.group(1)), m.group(2).lower(), val(m.group(3))
+    if op in ("plus", "+"):
+        r = a + b
+    elif op in ("minus", "-"):
+        r = a - b
+    elif op in ("times", "x", "*", "multiplied by"):
+        r = a * b
+    else:
+        if b == 0:
+            return "Dividing by zero? Even I cannot do that."
+        r = a / b
+    r = int(r) if float(r).is_integer() else round(r, 3)
+    return f"{m.group(1)} {op} {m.group(3)} is {r}."
+
+
+RANDOM = r"\b(random|fun|interesting|cool|surprising) (fact|thing)s?\b|\bsurprise me\b|\btell me something (new|interesting)\b"
+FACT_INTROS = {"visitor": ["Here's a fun one.", "Did you know?", "Here is something interesting."],
+               "owner": ["Here's one for you, sir.", "Did you know, sir?", "A fun one, sir."]}
+
+
+def _random_fact(q, owner):
+    import random
+    from iro.wiki import about, random_fact
+    f = random_fact(about(q))
+    if not f:
+        return None
+    LAST_FACT.update(title=f["title"], sents=[], pos=0)
+    return {"text": f"{random.choice(FACT_INTROS['owner' if owner else 'visitor'])} {f['text']}", "title": f["title"],
+            "ms": f["ms"]}
+
+
+def _bare_topic(q, owner):
+    """A short utterance that is just a name ("United Kingdom", "Mozart?"): look it up, but only if an
+    article has exactly that name (24 Oct: "United Kingdom" got a made-up fact about the flag)."""
+    from iro.wiki import ALIAS, topic_words
+    tw = topic_words(q)
+    if not tw or len(re.findall(r"\w+", q)) > 4 or small_talk_only(q) or card_topic(q):
+        return None
+    f = _fact(q, owner)
+    asked = ALIAS.get(" ".join(tw).lower(), " ".join(tw)).lower()
+    name = re.sub(r"^the |\s*\(.*\)$", "", (f or {}).get("title", "").lower())
+    return f if f and (name == asked or name.startswith(asked + " ")) else None
+
+
+def small_talk_only(q):
+    """Greetings, thanks, yes/no: never a topic."""
+    return bool(re.search(INTENTS["greet"] + "|" + INTENTS["bow"] + r"|^\W*(yes|no|okay|ok|sure|maybe|nope|yeah)\b",
+                          q, re.I))
+
+
+def _card_fact(q, owner):
+    """A heritage question answered straight from the team's knowledge card (24 Oct: asked about the
+    shadow puppets, the 2B model asked questions back, mentioned Egypt and "looked" with its camera).
+    The card's opening line + the line that best fits the question; "tell me more" carries on."""
+    import random
+    c = card_topic(q)
+    if not c or c == "arc_robot" or not (re.search(QUESTION, q, re.I) or re.search(r"\babout\b", q, re.I)
+                                         or len(re.findall(r"\w+", q)) <= 4):
+        return None
+    meta, body = card(c)
+    lines = [x.strip() for x in body.splitlines() if x.strip() and not x.startswith("#")]
+    if not lines:
+        return None
+    title = meta.get("title", c)
+    if MORE.search(q) and LAST_FACT.get("title") == title and LAST_FACT.get("sents"):
+        i = LAST_FACT["pos"]
+        pick = LAST_FACT["sents"][i:i + 2]
+        LAST_FACT["pos"] = i + 2
+        if not pick:
+            return {"text": "That is all I know about it.", "title": title, "ms": 0}
+    else:
+        names = {w for n in meta.get("names", []) for w in re.findall(r"[a-z]+", n.lower())}
+        qs = {w[:5] for w in re.findall(r"[a-z]+", q.lower()) if len(w) > 3 and w not in names} - \
+            {"tell", "about", "what", "know", "more", "please", "could", "would", "there", "their"}
+        best = max(lines[1:], key=lambda x: len(qs & {w[:5] for w in re.findall(r"[a-z]+", x.lower())}), default=None)
+        score = len(qs & {w[:5] for w in re.findall(r"[a-z]+", (best or "").lower())})
+        pick = [best] if best and score else lines[:2]      # a specific question: just its line
+        LAST_FACT.update(title=title, sents=[x for x in lines if x not in pick], pos=0)
+    opener = random.choice(FACT_OPENERS["owner" if owner else "visitor"])
+    return {"text": f"{opener} {' '.join(pick)}", "title": title, "ms": 0}
+
+
+def _courtesy(q, owner):
+    """'Thanks', 'bye': a fixed short line (24 Oct: "Thanks." got "Ah, sir, Sir")."""
+    if len(re.findall(r"\w+", q)) > 5:
+        return None
+    if re.search(r"\b(bye|goodbye|see you|selamat tinggal|auf wiedersehen)\b", q, re.I):
+        return {"text": "Goodbye, sir." if owner else "Goodbye, and thank you for visiting!", "title": "(courtesy)",
+                "ms": 0, "act": "bow"}
+    if re.search(r"\b(thanks|thank you|terima kasih|danke)\b", q, re.I):
+        return {"text": "You're welcome, sir." if owner else "You're welcome!", "title": "(courtesy)", "ms": 0}
+    return None
 
 
 def _same_topic(q):

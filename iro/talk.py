@@ -594,7 +594,7 @@ class Splitter:
 
     LOW_S = 2.5                                    # less speech than this still to come: hand over now
 
-    MAX_WORDS = 35                                 # the 2B ignores "about 35 words": spoke 16.8 s (24 Oct)
+    MAX_WORDS = 28                                 # the 2B ignores "at most 25 words"; owner: no yapping (24 Oct)
 
     def __init__(self, voice, lang, mood_ref, max_words=None):
         from iro.arc import all_openers
@@ -712,10 +712,14 @@ class Ears:
 
     ECHO_SIM = 0.62                                # this close to ARC's own echo voiceprint = ARC itself
 
-    def __init__(self, voice, barge_in=True, log=None, embedder=None, save_dir=None):
+    OWNER_SIM = 0.80                               # the owner's own voice: 0.84-0.90 cutting in, ARC's echo
+    #                                                0.53-0.69 (24 Oct, 21 saved checks)
+
+    def __init__(self, voice, barge_in=True, log=None, embedder=None, save_dir=None, owner=None):
         from iro.speaker import Vad, stream
         self.voice, self.barge_in, self.log = voice, barge_in, log or (lambda *a, **k: None)
         self.save_dir, self.n_saved = save_dir, 0  # each "maybe you" moment kept as a wav (review)
+        self.owner = owner if owner is not None and owner.ok else None
         if voice.echo_cancelled:
             # ARC's voice is already removed from what we hear (speaker.echo_cancel): speech now is
             # almost surely a person, so no loudness test and a quicker trigger. 24 Oct, without
@@ -775,7 +779,8 @@ class Ears:
             self.hot = self.hot + 1 if (self.bvad.speaking() and excess > self.EXCESS) else 0
             if self.hot >= self.HOT_FRAMES:
                 self.cand, self.hot = list(self.pre), 0
-                self.voice.duck(0.35)              # polite: lower the voice while finding out
+                if not self.voice.echo_cancelled:
+                    self.voice.duck(0.35)          # polite: lower the voice while finding out
                 self.log("barge_candidate", excess=round(excess, 1))
             return
         self.cand.append(a)
@@ -805,9 +810,16 @@ class Ears:
         """final=False: the early look (after EARLY_S), which only acts on "stop" / "wait"."""
         from iro.convo import judge
         text, _ = transcribe(pcm)
-        v = judge(text, spoken)
-        if not final and v != "stop":
-            self.deciding = False                  # not a stop word: wait for the full look
+        own = self.owner.score(pcm) if self.owner else 0.0
+        # a visitor needs 3 new words (2 let ARC's misheard echo through: "Our hips, stole"); the owner's
+        # own voice is enough, whatever the words came out as
+        v = judge(text, spoken, min_new=3)
+        if v == "echo" and own >= self.OWNER_SIM:
+            v = "interrupt"
+        if not final and v not in ("stop",) and own < self.OWNER_SIM:
+            if v == "interrupt":
+                self.voice.duck(0.35)              # it looks like a person: lower the voice while listening on
+            self.deciding = False                  # wait for the full look
             return
         sim = self.echo_sim(pcm) if v == "interrupt" and not self.voice.echo_cancelled else None
         if v == "interrupt" and sim is not None and sim >= self.ECHO_SIM:
@@ -821,7 +833,7 @@ class Ears:
                 w.setsampwidth(2)
                 w.setframerate(RATE)
                 w.writeframes(pcm.tobytes())
-        self.log("barge", event=v, heard=text, echo_sim=sim and round(sim, 2), wav=wav,
+        self.log("barge", event=v, heard=text, owner=round(own, 2), echo_sim=sim and round(sim, 2), wav=wav,
                  arc_was_saying=spoken[:120])
         self.verdict = v
 
@@ -890,6 +902,10 @@ def main():
     from iro.hw.system import mem_available_mb
     need = 2200 if stt_engine() == "moonshine" else 3000   # ARC ~1.3 GB + voice ~0.6 (+ Whisper ~0.8) + headroom
     have = mem_available_mb()
+    # ARC's own servers still running (e.g. after Ctrl+C) are reused, not started again: their memory counts
+    for name, mb in (("llama-server", 1300), ("tts-server", 600), ("whisper-server", 800)):
+        if subprocess.run(["pgrep", "-x", name], capture_output=True).returncode == 0:
+            need -= mb
     if have < need and not any(x in a for x in ("--force",)):
         print(f"Only {have} MB of memory is free; ARC's voice loop needs about {need} MB. Close other programs "
               "(VS Code on the Jetson itself uses ~1.5 GB: use Remote-SSH from a laptop instead), stop old servers "
@@ -922,7 +938,8 @@ def main():
     ring = Ring(mic)
     body = Body(robot="--robot" in a)
     owner_id = Owner()
-    ears = Ears(voice, barge_in="--no-barge-in" not in a, log=r.log, embedder=owner_id.ears, save_dir=r.dir)
+    ears = Ears(voice, barge_in="--no-barge-in" not in a, log=r.log, embedder=owner_id.ears, save_dir=r.dir,
+                owner=owner_id)
     from iro.voice import cfg as voice_cfg
     from iro.voice import save_cfg
     reply_words = int(voice_cfg().get("reply_words", Splitter.MAX_WORDS))

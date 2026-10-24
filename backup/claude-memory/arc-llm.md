@@ -73,3 +73,9 @@ Fallback if still poor: a speaker on the reSpeaker's 3.5 mm jack, so its hardwar
 - topic words are de-duplicated; meant/see/said/asked are QWORDS; ALIAS america -> United States; CONTEXT now includes heritage words.
 - The title must share a stem with the topic (the redirect path counts); namesake "(...)" and surname pages are penalised; "who" prefers people; "tell me more about X" continues the same article.
 - A 20-question check is all sensible, at ~110 ms each.
+
+**24 Oct, session 160221 (owner said ARC is "not very knowledgeable"):**
+- persona.md now says it has the whole encyclopedia and answers any topic, never "only heritage", never invents, never claims camera sightings; OWNER never refuses.
+- New routes in respond: `_math` (exact sums), RANDOM "fun/random fact (about X)" -> `wiki.random_fact`, `_bare_topic` (a name alone, exact title only); "why" questions go to the LLM.
+- wiki: `about()` ("fact about the UK"), ALIAS, `how_subject()` + `singulars()` ("how do bees make honey" -> Bee), NAMESAKE first-sentence penalty (films, bands, games...), digits kept in topic words, 5 candidate paths. A 25-question check is all right; Strauss -> Eduard (minor).
+- Barge-in: the owner's voiceprint >= 0.80 interrupts (owner cut-ins scored 0.84-0.90, echo 0.53-0.69). Visitors need 3 new words, or 2 if one is a capitalised name. No ducking until a check looks like a person. Replaying the 21 saved checks: only the 3 owner cut-ins interrupt.

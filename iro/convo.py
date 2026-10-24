@@ -101,7 +101,8 @@ def is_noise(text):
 
 
 FUNCTION = set("the and you can could would tell what about for with this that are is was who how why when "
-               "where your there have has please just like then than not but from into".split())
+               "where your there have has please just like then than not but from into our its it's his her "
+               "she they them their we were had been i'm you're that's there's let's".split())
 STOPS = set("stop wait hold hang quiet shush enough pause silence arc ark okay".split())
 
 
@@ -109,7 +110,7 @@ def _stem(w):
     return w[:5]
 
 
-def judge(heard, spoken):
+def judge(heard, spoken, min_new=2):
     """Something was heard while ARC talks: "stop", "interrupt" (a person said something new) or "echo"
     (ARC's own voice coming back, or noise). heard: its transcript; spoken: what ARC was saying."""
     if not heard.strip():
@@ -121,7 +122,12 @@ def judge(heard, spoken):
     if is_stop(heard) and not beyond:
         return "stop"                              # "stop", "wait, wait": stop and listen
     overlap = 1 - len(new) / max(len(content), 1)
-    if (len(new) >= 2 and overlap < 0.6) or (is_stop(heard) and beyond):
+    # a name nobody was saying (Mozart, France) makes 2 new words enough: misheard echo comes out as
+    # everyday words ("Our hips, stole")
+    toks = re.findall(r"[A-Za-zÀ-ÿ']+", heard)
+    named = [t for t in toks[1:] if t[0].isupper() and _stem(t.lower()) not in mine and t.lower() not in FUNCTION]
+    need = min(min_new, 2) if named else min_new
+    if (len(new) >= need and overlap < 0.6) or (is_stop(heard) and beyond):
         return "interrupt"                         # "wait, what about Japan?": a new question
     if command(heard, owner=False)[0] in ("repeat", "louder", "softer", "shorter", "longer"):
         return "interrupt"

@@ -281,7 +281,7 @@ def topic_words(q):
     """The question's content words (no fillers, pronouns, question words), each once ("Japan. Japan."
     found the film "Japan Japan", 24 Oct): empty = no real topic."""
     out = []
-    for w in re.findall(r"[A-Za-zÀ-ÿ'-]+", q):
+    for w in re.findall(r"[A-Za-zÀ-ÿ0-9'-]+", q):   # numbers too: "World War 2"
         if w.lower() not in QWORDS and w.lower() not in (x.lower() for x in out):
             out.append(w)
     return out
@@ -342,6 +342,55 @@ def _relation_answer(a, rel, subj):
     return None
 
 
+ABOUT = re.compile(r"\babout (?:the )?([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ' -]*)", re.I)
+
+
+def about(q):
+    """What the question is ABOUT, if it says so: "Could you love? Give me a random fact about the UK"
+    is about the United Kingdom, not love (24 Oct)."""
+    m = ABOUT.search(q)
+    if not m:
+        return None
+    out = []
+    for w in m.group(1).split()[:4]:
+        if w.lower() in ENDS:
+            break
+        if w.lower() not in QWORDS:
+            out.append(w)
+    x = " ".join(out).strip(" -'")
+    return ALIAS.get(x.lower(), x) or None
+
+
+HOW = re.compile(r"\bhow (?:do |does |did |can |could |is |are )?(?:the |a |an )?([A-Za-z]+(?: [A-Za-z]+)?) "
+                 r"([a-z]+)\W*$", re.I)
+
+
+def singulars(w):
+    """volcanoes -> volcano, airplanes -> airplane (article titles are singular)."""
+    w = w.strip()
+    out = []
+    if w.lower().endswith("ies"):
+        out.append(w[:-3] + "y")
+    if w.lower().endswith("s") and not w.lower().endswith("ss"):
+        out.append(w[:-1])                         # bees -> bee (before "es": bees -> "Be")
+    if w.lower().endswith("es"):
+        out.append(w[:-2])                         # volcanoes -> volcano
+    return [x for x in dict.fromkeys(out + [w]) if len(x) >= 3]
+
+
+def how_subject(q):
+    """['bees'] for "how do bees make honey", ['solar panels', 'solar'] for "how do solar panels work"."""
+    h = HOW.search(q.strip())
+    if not h:
+        return []
+    ws = [w for w in h.group(1).split() if w.lower() not in QWORDS]
+    return list(dict.fromkeys([" ".join(ws), ws[0]])) if ws else []
+
+
+NAMESAKE = re.compile(r"\b(is|was|are|were) an? (\d{4} |[\w-]+ ){0,4}(film|movie|song|album|single|EP|video game|game|novel|"
+                      r"band|group|television series|TV series|play|musical|autobiography|book|rapper|company|brand)\b", re.I)
+
+
 def _candidates(q):
     """Title guesses from the question: "History of X" first when asked about history (24 Oct: "the history
     of America" became a lookup of "America"), then content-word n-grams, longest first."""
@@ -355,6 +404,12 @@ def _candidates(q):
         x = " ".join(content)                      # "some history information about Japan" (24 Oct)
     if x:
         out += [f"History of {x}", f"History of the {x}"]
+    ab = about(q)
+    if ab and not out:
+        out += [ab, ab.title(), "The " + ab]
+    for subj in how_subject(q):                     # "how do airplanes fly": the airplane, not the fly
+        for x in singulars(subj):
+            out += [x.capitalize(), x]
     for n in range(min(4, len(content)), 0, -1):
         for i in range(len(content) - n + 1):
             g = content[i:i + n]
@@ -447,7 +502,7 @@ def summary(q, lang="en", n=2):
                 paths.append(v)
                 if cand.lower().startswith("history of"):
                     preferred.add(v)               # asked for the history: that article wins
-        if len(paths) >= 3:
+        if len(paths) >= 5:
             break
     words = " ".join(topic_words(q))
     if words:
@@ -473,6 +528,13 @@ def summary(q, lang="en", n=2):
             continue                               # a list of meanings (or of people named Strauss) is never it
         if path in preferred:
             score += 5
+        subj = how_subject(q)
+        if subj and any(_stem(x.lower()) in {_stem(w) for w in re.findall(r"[a-z]+", title.lower())}
+                        for x in sum((singulars(x) for x in subj), [])):
+            score += 3                             # what the "how" question is about
+        nm = NAMESAKE.search(sents[0])
+        if nm and not re.search(rf"\b{nm.group(3)}", q, re.I):
+            score -= 3                             # "Where the Bees Make Honey" is a video game
         # ARC talks about heritage: a close call goes to the composer, not the company (Strauss)
         score += min(2.0, 0.5 * len({_stem(w) for w in CONTEXT} & {_stem(w) for w in re.findall(r"[a-z]+", lead)}))
         if re.match(r"\W*who\b", q.strip(), re.I) and not re.search(
@@ -542,3 +604,31 @@ def summary(q, lang="en", n=2):
                     "ms": round((time.time() - t0) * 1000)}
     return None
 
+
+
+# "Give me a random fact": something real and interesting, from an article people know
+FAMOUS = ["Malacca Sultanate", "Wayang kulit", "Kuala Lumpur", "Petronas Towers", "Borneo", "Mount Kinabalu", "Batik",
+          "Vienna", "Habsburg monarchy", "Wolfgang Amadeus Mozart", "Schönbrunn Palace", "Danube", "Johann Strauss II",
+          "Japan", "Great Wall of China", "Ancient Egypt", "Roman Empire", "Leonardo da Vinci", "Moon", "Octopus",
+          "Honey", "Mount Everest", "Amazon rainforest", "Albert Einstein", "Olympic Games", "Chess", "Coffee", "Volcano",
+          "Blue whale", "Saturn", "Printing press", "Silk Road", "Taj Mahal", "Pyramids of Giza", "Robot"]
+
+
+def random_fact(subject=None, lang="en"):
+    """{title, text, ms}: one interesting sentence (with a number, or a solid middle-length one) from
+    the subject's article, or from a well-known article when no subject is given."""
+    import random
+    for _ in range(4):
+        topic = subject or random.choice(FAMOUS)
+        s = summary(f"Tell me about {topic}", lang, n=1)
+        if not s:
+            if subject:
+                return None
+            continue
+        pool = [x for x in s.get("sents", []) if 50 <= len(x) <= 230]
+        good = [x for x in pool if re.search(r"\d", x)] or pool
+        if good:
+            return {"title": s["title"], "text": random.choice(good[:8]), "ms": s["ms"], "sents": [], "next": 0}
+        if subject:
+            return s
+    return None
