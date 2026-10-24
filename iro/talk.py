@@ -25,7 +25,6 @@ import base64
 import json
 import os
 import queue
-import random
 import re
 import subprocess
 import sys
@@ -91,7 +90,28 @@ def stt_lang():
 
 # ------------------------------------------------------------------ write (Whisper)
 
+MOONSHINE = Path.home() / "voice-models" / "sherpa-onnx-moonshine-base-en-int8"
+_moon = None
+
+
+def stt_engine():
+    """moonshine (default, ARC Lite): CPU, ~0.25 s, English; whisper: GPU, ~1 GB, 99 languages."""
+    from iro.voice import cfg
+    return cfg().get("stt", "moonshine")
+
+
 def start_whisper():
+    """Load the speech recogniser (name kept for older callers)."""
+    global _moon
+    if stt_engine() == "moonshine":
+        if _moon is None:
+            import sherpa_onnx
+            m = MOONSHINE
+            _moon = sherpa_onnx.OfflineRecognizer.from_moonshine(
+                preprocessor=str(m / "preprocess.onnx"), encoder=str(m / "encode.int8.onnx"),
+                uncached_decoder=str(m / "uncached_decode.int8.onnx"), cached_decoder=str(m / "cached_decode.int8.onnx"),
+                tokens=str(m / "tokens.txt"), num_threads=4)
+        return
     url = f"http://127.0.0.1:{WHISPER_PORT}"
     if not get(url + "/health"):
         from iro.hw.system import expendable
@@ -103,7 +123,26 @@ def start_whisper():
 
 
 def transcribe(pcm16, lang=None):
-    """(text, language) of 16 kHz mono int16 audio. lang: fixed language ("en") or "auto"."""
+    """(text, language) of 16 kHz mono int16 audio. Moonshine (24 Oct, ARC Lite: 0.25 s on the CPU,
+    as accurate as Whisper on the owner's recorded voice) + names fixed by sound (iro/names.py)."""
+    from iro.names import fix
+    if stt_engine() == "moonshine":
+        start_whisper()
+        st = _moon.create_stream()
+        st.accept_waveform(RATE, np.asarray(pcm16, np.float32) / 32768.0)
+        _moon.decode_stream(st)
+        text = st.result.text.strip()
+        if not text or PHANTOM.match(text) and len(pcm16) < RATE * 0.8:
+            return "", "en"
+        text = fix(text)
+        for pat, rep_ in FIXES.items():
+            text = re.sub(pat, rep_, text, flags=re.I)
+        return text, "en"
+    return _transcribe_whisper(pcm16, lang)
+
+
+def _transcribe_whisper(pcm16, lang=None):
+    """(text, language) via the whisper.cpp server. lang: fixed language ("en") or "auto"."""
     import io
     lang = lang or stt_lang()
     buf = io.BytesIO()
@@ -192,6 +231,7 @@ class Voice:
             base = rms.get(self.name, 3000.0)
             self.gain = {n: float(np.clip(base / v, 0.6, 1.6)) for n, v in rms.items()}   # even loudness (#18)
         self.cache = {}
+        self.cache_dir = Path.home() / "voice-samples" / "cache" / self.voice
         self.text_q, self.audio_q = queue.Queue(), queue.Queue()
         self.pending = 0
         self.lock = threading.Lock()
@@ -202,9 +242,24 @@ class Voice:
         self.player = None
         threading.Thread(target=self._synth, daemon=True).start()
         threading.Thread(target=self._play, daemon=True).start()
-        for line in lines:                         # pre-record common lines (#6); also warms the voice (#9)
-            for mood in (None,):
-                self.cache[(line, mood)] = self.render(line, mood)
+        self.precache([(line, None) for line in lines])   # common lines (#6); also warms the voice (#9)
+
+    def precache(self, items):
+        """Pre-recorded lines, kept on disk (made once, ~1-2 s each), loaded into memory."""
+        import hashlib
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        todo = 0
+        for text, mood in items:
+            f = self.cache_dir / (hashlib.sha1(f"{mood}|{text}".encode()).hexdigest()[:16] + ".npy")
+            if f.exists():
+                self.cache[(text, mood)] = np.load(f)
+                continue
+            if not todo:
+                print("  recording ARC's openers in every mood (once; ~2 min)...", flush=True)
+            todo += 1
+            a = self.render(text, mood)
+            np.save(f, a)
+            self.cache[(text, mood)] = a
 
     # -- making audio
     def _stream(self, text, mood, lang="English"):
@@ -273,10 +328,26 @@ class Voice:
             with self.lock:
                 self.pending -= 1
 
+    def _sink(self):
+        """The configured output if it exists, else the default, else any: an HDMI screen drops its audio
+        device when it sleeps or switches input ("No such entity", 24 Oct: ARC talked to nothing)."""
+        out = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True).stdout
+        sinks = [ln.split("\t")[1] for ln in out.splitlines() if "\t" in ln]
+        if self.sink in sinks:
+            return self.sink
+        info = subprocess.run(["pactl", "info"], capture_output=True, text=True).stdout
+        default = next((ln.split(":", 1)[1].strip() for ln in info.splitlines() if ln.startswith("Default Sink")), "")
+        for cand in [default] + [x for x in sinks if "hdmi" in x] + [x for x in sinks if "XVF3800" in x] + sinks:
+            if cand in sinks:
+                print(f"\n(sound output {self.sink} is missing; using {cand})")
+                return cand
+        return self.sink
+
     def _ensure_player(self):
         if self.player is None or self.player.poll() is not None:
+            dev = self._sink()
             self.player = subprocess.Popen(["pacat", "--raw", "--format=s16le", f"--rate={OUT_RATE}", "--channels=1",
-                                            f"--device={self.sink}", "--latency-msec=60"], stdin=subprocess.PIPE)
+                                            f"--device={dev}", "--latency-msec=60"], stdin=subprocess.PIPE)
 
     def _write(self, a):
         self._ensure_player()
@@ -335,26 +406,57 @@ class Splitter:
     """Streamed reply -> the first clause at once (#4), the rest as one paragraph (#12). If the reply
     grows long before it ends, it is flushed at sentence ends so the voice never runs dry."""
 
+    MAX_WORDS = 45                                 # the 2B ignores "about 35 words": spoke 16.8 s (24 Oct)
+
     def __init__(self, voice, lang, mood_ref):
+        from iro.arc import OPENERS
         self.voice, self.lang, self.mood = voice, lang, mood_ref
-        self.buf, self.first_done = "", False
+        self.buf, self.first_done, self.opener_done = "", False, False
+        self.openers = sorted({o for v in OPENERS.values() for o in v}, key=len, reverse=True)
+        self.said_words, self.done = 0, False
+
+    def _say(self, text):
+        if self.done:
+            return
+        words = len(text.split())
+        if self.said_words + words > self.MAX_WORDS and self.said_words:
+            cut = re.split(r"(?<=[.!?])\s+", text)          # finish the sentence that crosses the limit
+            keep = []
+            for x in cut:
+                keep.append(x)
+                if self.said_words + len(" ".join(keep).split()) >= self.MAX_WORDS:
+                    break
+            text, self.done = " ".join(keep), True
+        self.said_words += len(text.split())
+        self.voice.say(text, self.lang, self.mood["mood"])
 
     def feed(self, s):
         self.buf += s
+        if not self.opener_done:                   # the pre-recorded opener goes out the moment it is written
+            lead = self.buf.lstrip()
+            hit = next((o for o in self.openers if lead.startswith(o + " ")), None)
+            if hit:
+                self._say(hit)
+                self.buf, self.opener_done = lead[len(hit) + 1:], True
+            elif len(lead) > 24:
+                self.opener_done = True            # no opener (e.g. a fact answer): carry on as usual
+            else:
+                return
         if not self.first_done:
-            m = re.search(r"^(.{12,}?[.!?])\s|^((?:\S+\s+){4,}?\S*[,;:—-])\s", self.buf)
+            # "Hello!" alone may go first (it waited for the whole next sentence: 3+ s, 24 Oct)
+            m = re.search(r"^(.{5,}?[.!?])\s|^((?:\S+\s+){3,}?\S*[,;:—-])\s", self.buf)
             if m:
                 cut = m.end()
-                self.voice.say(self.buf[:cut], self.lang, self.mood["mood"])
+                self._say(self.buf[:cut])
                 self.buf, self.first_done = self.buf[cut:], True
         elif len(self.buf) > 220:                  # long story: hand over whole sentences as they come
             parts = re.split(r"(?<=[.!?])\s+", self.buf)
             if len(parts) > 1:
-                self.voice.say(" ".join(parts[:-1]), self.lang, self.mood["mood"])
+                self._say(" ".join(parts[:-1]))
                 self.buf = parts[-1]
 
     def flush(self):
-        self.voice.say(self.buf, self.lang, self.mood["mood"])
+        self._say(self.buf)
         self.buf = ""
 
 
@@ -427,14 +529,14 @@ def main():
     from concurrent.futures import ThreadPoolExecutor
 
     from iro.arc import cfg as arc_cfg
-    from iro.arc import needs_lookup, respond, start, topic
+    from iro.arc import respond, start, topic
     from iro.record import run
     from iro.skills import Body
     from iro.speaker import Owner
     a = sys.argv[1:]
     r = run("arc-talk")
     from iro.hw.system import mem_available_mb
-    need = 3000                                    # ARC (~1.3 GB) + Whisper (~0.8) + voice (~0.5) + headroom
+    need = 2200 if stt_engine() == "moonshine" else 3000   # ARC ~1.3 GB + voice ~0.6 (+ Whisper ~0.8) + headroom
     have = mem_available_mb()
     if have < need and not any(x in a for x in ("--force",)):
         print(f"Only {have} MB of memory is free; ARC's voice loop needs about {need} MB. Close other programs "
@@ -446,7 +548,10 @@ def main():
     start(quiet=True)
     start_whisper()
     greet = topic()["greeting"]["en"]
-    voice = Voice(lines=[greet] + ACKS["visitor"] + ACKS["owner"])
+    voice = Voice(lines=[greet])
+    from iro.arc import OPENERS
+    voice.precache([(o, m) for o in sorted({x for v in OPENERS.values() for x in v})
+                    for m in [None] + sorted(voice.moods)])
     # warm everything once (#8, #9): Wikipedia's index from disk, Whisper, ARC's prompt cache
     try:
         from iro.wiki import archives, search
@@ -508,9 +613,9 @@ def main():
                 w.setframerate(RATE)
                 w.writeframes(u.tobytes())
             voice.first_audio = None
-            ack = needs_lookup(text)
-            if ack:                                # a lookup takes seconds: say so at once (#5)
-                voice.say(random.choice(ACKS["owner" if is_owner else "visitor"]))
+            # ARC Lite: facts come from the article summary in < 1 s, so no "let me think" any more
+            # (24 Oct: it only made the answer longer). Kept for slow paths: none at the moment.
+            ack = False
             mood = {"mood": None}
             split = Splitter(voice, LANG_NAMES.get(lang, "English"), mood)
             t_think = time.time()

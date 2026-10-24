@@ -230,3 +230,200 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# ------------------------------------------------------------------ ARC Lite: answer from the article's summary
+# (24 Oct) Every Wikipedia article starts with a summary written by its editors: usually the exact
+# answer. Found by TITLE from the question's own words (no model call: the keyword step took up to
+# 7 s), disambiguation pages followed by context, 1-2 clean sentences returned in ~20-80 ms.
+
+QWORDS = set("who whom whose what which when where why how is are was were do does did can could would will "
+             "tell me about please explain describe the a an of in on at to for and or did you know i want "
+             "know more give story history founded found built made invented discovered created wrote "
+             "composed started began happened mean meaning called name named this that it its them those these "
+             "sure okay ok yes yeah please something anything more like hear learn would want some little bit "
+             "interesting interested".split())
+CONTEXT = set("malaysia malaysian malay malacca melaka kelantan terengganu sultan sultanate king kingdom austria "
+              "austrian vienna habsburg heritage tradition traditional culture history historical".split())
+ABBREV = re.compile(r"\b(c|ca|St|Dr|Mr|Mrs|Ms|Jr|Sr|vs|e\.g|i\.e|U\.S|No|approx|est|b|d|r)\.$")
+
+
+def _strip_parens(t):
+    out, depth = [], 0
+    for ch in t:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]" and depth:
+            depth -= 1
+        elif not depth:
+            out.append(ch)
+    return re.sub(r"\s+([,.;:])", r"\1", re.sub(r"\s{2,}", " ", "".join(out))).strip()
+
+
+def sentences_of(t):
+    parts, cur = [], ""
+    for piece in re.split(r"(?<=[.!?])\s+", t):
+        cur = f"{cur} {piece}".strip() if cur else piece
+        if not ABBREV.search(cur):                 # "c. 1400" is not the end of a sentence
+            parts.append(cur)
+            cur = ""
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+def topic_words(q):
+    """The question's content words (no fillers, pronouns, question words): empty = no real topic."""
+    return [w for w in re.findall(r"[A-Za-zÀ-ÿ'-]+", q) if w.lower() not in QWORDS]
+
+
+def _candidates(q):
+    """Title guesses from the question: "History of X" first when asked about history (24 Oct: "the history
+    of America" became a lookup of "America"), then content-word n-grams, longest first."""
+    content = topic_words(q)
+    out = []
+    m = re.search(r"\bhistory of (?:the )?([A-Za-zÀ-ÿ' -]+)", q, re.I)
+    if m:
+        x = " ".join(w for w in m.group(1).split() if w.lower() not in QWORDS)
+        if x:
+            out += [f"History of {x}", f"History of the {x}"]
+    for n in range(min(4, len(content)), 0, -1):
+        for i in range(len(content) - n + 1):
+            g = content[i:i + n]
+            out.append(" ".join(g))
+    return out
+
+
+def _stem(w):
+    return w.lower()[:5]
+
+
+# for SCORING, the question's verbs matter ("founded" finds the founding sentence, "composed" the
+# composer): only true filler words are dropped (24 Oct: the 1511 sentence beat the founding one)
+FILLER = set("who whom whose what which when where why how is are was were do does did can could would will "
+             "tell me about please explain describe the a an of in on at to for and or you know i want".split())
+
+
+def _qstems(q):
+    return {_stem(w) for w in re.findall(r"[A-Za-zÀ-ÿ]+", q) if w.lower() not in FILLER and len(w) > 2}
+
+
+def _resolve(a, path, q):
+    """Follow redirects and disambiguation pages to one article: (title, html)."""
+    for _ in range(3):
+        e = a.get_entry_by_path(path)
+        if e.is_redirect:
+            e = e.get_redirect_entry()
+        raw = bytes(e.get_item().content).decode("utf-8", "ignore")
+        first = re.search(r"<p\b[^>]*>(.*?)</p>", raw, flags=re.S | re.I)
+        if first and "may refer to" in first.group(1):
+            qs = _qstems(q)
+            ctx = {_stem(w) for w in CONTEXT}
+            best, best_s = None, -1
+            for href, li in re.findall(r'<li><a href="([^"#]+)"[^>]*>.*?</a>(.*?)</li>', raw, flags=re.S):
+                st = {_stem(w) for w in re.findall(r"[a-z]+", (html.unescape(_TAG.sub(" ", li)) + " " +
+                                                             href.replace("_", " ")).lower())}
+                sc = 3 * len(qs & st) + len(ctx & st)  # the question's words count most; context breaks ties
+                if sc > best_s:
+                    best, best_s = href, sc
+            if best and a.has_entry_by_path(best):
+                path = best
+                continue
+        return e.title, raw
+    return e.title, raw
+
+
+def _lead_sentences(raw, paragraphs=3):
+    raw = re.sub(r"<(table|style|script|sup|figure)\b.*?</\1>", " ", raw, flags=re.S | re.I)
+    out = []
+    for p in re.findall(r"<p\b[^>]*>(.*?)</p>", raw, flags=re.S | re.I):
+        text = re.sub(r"\s+", " ", html.unescape(_TAG.sub("", p))).strip()
+        if len(text) > 60:
+            out += sentences_of(_strip_parens(re.sub(r"\[\d+\]", "", text)))
+            paragraphs -= 1
+            if not paragraphs:
+                break
+    return out
+
+
+def summary(q, lang="en", n=2):
+    """{title, text, ms} for a question: several candidate articles (title matches, "The ..." forms,
+    full-text hits) are scored by how many of the question's words their opening contains; the
+    answer is the first sentence (what it is) + the sentence that best matches the question
+    (where the date / founder / composer usually is). None if nothing fits."""
+    t0 = time.time()
+    arcs = archives().get(lang) or archives().get("en") or []
+    if not arcs:
+        return None
+    a = arcs[0]
+    paths = []
+    for cand in _candidates(q):
+        forms = [cand.replace(" ", "_"), cand.title().replace(" ", "_"), cand.capitalize().replace(" ", "_")]
+        forms += ["The_" + f for f in forms]
+        for v in dict.fromkeys(forms):
+            if len(v) > 2 and a.has_entry_by_path(v) and v not in paths:
+                paths.append(v)
+        if len(paths) >= 3:
+            break
+    words = " ".join(w for w in re.findall(r"\w+", q) if w.lower() not in QWORDS)
+    if words:
+        from libzim.search import Query, Searcher
+        paths += [h for h in Searcher(a).search(Query().set_query(words)).getResults(0, 3) if h not in paths]
+    qs = _qstems(q)
+    best = None
+    for rank, path in enumerate(paths[:6]):
+        try:
+            title, raw = _resolve(a, path, q)
+        except Exception:                          # noqa: BLE001 - a broken entry: skip it
+            continue
+        sents = _lead_sentences(raw)
+        if not sents:
+            continue
+        lead = " ".join(sents[:4]).lower()
+        score = len(qs & {_stem(w) for w in re.findall(r"[a-z]+", lead)}) + \
+            len(qs & {_stem(w) for w in re.findall(r"[a-z]+", title.lower())}) - 0.1 * rank
+        if re.search(r"\((film|song|album|TV|band|novel|video game|soundtrack)", title):
+            score -= 2                             # the thing itself, not a film named after it
+        if best is None or score > best[0]:
+            best = (score, title, sents)
+    if best is None or best[0] <= 0:
+        return None
+    _, title, sents = best
+    pick = [sents[0]]
+    if n > 1 and len(sents) > 1:
+        sc = [len(qs & {_stem(w) for w in re.findall(r"[A-Za-z]+", x)}) for x in sents[1:8]]
+        if max(sc) > 0:
+            pick.append(sents[1 + int(np.argmax(sc))])
+        else:
+            pick.append(sents[1])
+    rest = [x for x in sents if x not in pick]
+    return {"title": title, "text": " ".join(pick), "ms": round((time.time() - t0) * 1000),
+            "sents": rest, "next": 0}
+
+    a = arcs[0]
+    path = None
+    for cand in _candidates(q):
+        for v in {cand.replace(" ", "_"), cand.title().replace(" ", "_"), cand.capitalize().replace(" ", "_")}:
+            if len(v) > 2 and a.has_entry_by_path(v):
+                path = v
+                break
+        if path:
+            break
+    if path is None:                               # no title match: the full-text index
+        from libzim.search import Query, Searcher
+        words = " ".join(w for w in re.findall(r"\w+", q) if w.lower() not in QWORDS)
+        if not words:
+            return None
+        hits = list(Searcher(a).search(Query().set_query(words)).getResults(0, 1))
+        if not hits:
+            return None
+        path = hits[0]
+    title, raw = _resolve(a, path, q)
+    raw = re.sub(r"<(table|style|script|sup|figure)\b.*?</\1>", " ", raw, flags=re.S | re.I)
+    for p in re.findall(r"<p\b[^>]*>(.*?)</p>", raw, flags=re.S | re.I):
+        text = re.sub(r"\s+", " ", html.unescape(_TAG.sub("", p))).strip()
+        if len(text) > 60:
+            text = _strip_parens(re.sub(r"\[\d+\]", "", text))
+            return {"title": title, "text": " ".join(sentences_of(text)[:n]),
+                    "ms": round((time.time() - t0) * 1000)}
+    return None
+

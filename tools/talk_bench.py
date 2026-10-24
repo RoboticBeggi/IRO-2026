@@ -47,7 +47,9 @@ def main():
     t = time.time()
     arc.start(quiet=True)
     talk.start_whisper()
-    voice = talk.Voice(lines=talk.ACKS["visitor"])
+    voice = talk.Voice()
+    voice.precache([(o, m) for o in sorted({x for v in arc.OPENERS.values() for x in v})
+                    for m in [None] + sorted(voice.moods)])
     talk.transcribe(np.zeros(talk.RATE, np.int16))
     arc.ask([{"role": "user", "content": "Hello"}], max_tokens=4, wiki=False)
     print(f"ready in {time.time() - t:.0f} s\n")
@@ -60,8 +62,6 @@ def main():
         text, lang = talk.transcribe(u)
         t_heard = time.time() - t0
         voice.first_audio = None
-        if arc.needs_lookup(text):
-            voice.say(talk.ACKS["visitor"][0])
         mood = {"mood": None}
         split = talk.Splitter(voice, "English", mood)
         replies = arc.respond(body, [], text, "en", on_text=split.feed, on_mood=lambda m: mood.update(mood=m))

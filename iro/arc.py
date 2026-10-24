@@ -78,7 +78,11 @@ def topic(name=None):
 
 
 QUESTION = (r"\?|\b(what|who|whom|whose|when|where|why|how|which|tell me|explain|describe|apa|siapa|bila|"
-            r"mengapa|kenapa|bagaimana|ceritakan|was|wer|wann|wo|warum|wie|erz(ä|a)hl)\b")
+            r"mengapa|kenapa|bagaimana|ceritakan|was|wer|wann|wo|warum|wie|erz(ä|a)hl|"
+            # requests count too (24 Oct: "I would like to hear about the history of America" was not looked up)
+            r"(i would|i'd|i want to|i wanna) (like to )?(hear|know|learn)|teach me|talk about|what about|"
+            r"history of|do you know)\b")
+MORE = re.compile(r"\b(more|go on|continue|and then|tell me about (this|that|it)|what else)\b", re.I)
 
 
 def small_talk(q):
@@ -91,7 +95,13 @@ def small_talk(q):
 
 def needs_lookup(q):
     """Will this question go to offline Wikipedia? (the voice says "let me think" right away if so)"""
-    return bool(cfg().get("wiki")) and not card_topic(q) and not small_talk(q)
+    # only real questions: "I like your voice" went to Wikipedia and came back as a Korean TV show (24 Oct)
+    from iro.wiki import topic_words
+    if not cfg().get("wiki") or card_topic(q) or small_talk(q) or re.search(r"\b(you|your|yourself|arc)\b", q, re.I):
+        return False
+    if MORE.search(q) and LAST_FACT.get("sents") and not topic_words(q):
+        return True                                # "tell me more" continues the last article
+    return bool(re.search(QUESTION, q, re.I)) and bool(topic_words(q))
 
 
 def card_topic(q):
@@ -184,17 +194,18 @@ def start(model=None, quiet=False):
 # ------------------------------------------------------------------ asking
 
 def ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wiki=True, state=None,
-        acts=True, _retry=True, on_mood=None):
+        acts=True, _retry=True, on_mood=None, openers=None):
     """See _ask. If the model server died (23 Oct: it dropped a connection once during a long test),
     restart it and try once more: a silent robot in front of the judges is the worst outcome."""
     try:
-        return _ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts, on_mood)
+        return _ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts, on_mood, openers)
     except (ConnectionError, urllib.error.URLError, OSError) as e:
         if not _retry:
             raise
         print(f"\n(model server problem: {e}; restarting it)")
         start(running_key() or cfg()["model"], quiet=True)
-        return ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts, _retry=False, on_mood=on_mood)
+        return ask(messages, lang, on_text, max_tokens, temperature, wiki, state, acts, _retry=False, on_mood=on_mood,
+                   openers=openers)
 
 
 def running_key():
@@ -204,7 +215,7 @@ def running_key():
 
 
 def _ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wiki=True, state=None,
-         acts=True, on_mood=None):
+         acts=True, on_mood=None, openers=None):
     """Stream one reply. messages: chat history ending with the user's turn (system added here).
     Returns {text, act, lang, ttft, first_sentence, total, tokens, tok_s}. on_text(chunk) gets the
     spoken text as it streams (the action tag is removed first)."""
@@ -214,11 +225,13 @@ def _ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wik
     if wiki and needs_lookup(messages[-1]["content"]):
         # offline Wikipedia: the best paragraphs for this question. Not when the team's cards cover
         # it: 23 Oct the Indonesian wayang article overrode the Kelantan card (and it costs ~2.4 s)
-        from iro.wiki import lookup
-        look = lookup(messages[-1]["content"], lang or "en")
-        if look["passages"]:
-            ref = "\n\n".join(f"[{ti}] {tx}" for ti, tx, _ in look["passages"])
-            msgs[-1]["content"] += f"\n\nREFERENCE (offline encyclopedia; use only what answers the question):\n{ref}"
+        # ARC Lite (24 Oct): the article's own summary, found by title in ~50-150 ms, replaces the
+        # keyword model call + paragraph ranking (up to 7 s, and it often picked the wrong passage)
+        from iro.wiki import summary
+        look = summary(messages[-1]["content"], "en")
+        if look:
+            msgs[-1]["content"] += (f"\n\nREFERENCE (Wikipedia, {look['title']}): {look['text']}\n"
+                                    "Answer from this reference in your own short spoken words.")
     if state:                                     # what the body is doing / holding / has seen
         msgs[-1]["content"] += f"\n\n(Robot status: {state}.)"
     if lang:                                      # the speech recogniser tells us the language
@@ -227,7 +240,7 @@ def _ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wik
             "top_p": 0.95, "cache_prompt": True, "chat_template_kwargs": {"enable_thinking": False},
             "id_slot": 0,                         # slot 0 keeps ARC's prompt cached; wiki keywords use slot 1
             # grammar: an optional <act> from the menu only, then text (no tag at all if acts=False)
-            "grammar": _grammar(messages[-1]["content"]) if acts else 'root ::= mood? [^<]*\n' + MOOD_RULE,
+            "grammar": _grammar(messages[-1]["content"], openers) if acts else 'root ::= mood? [^<]*\n' + MOOD_RULE,
             "repeat_penalty": 1.15, "repeat_last_n": 128,      # 23 Oct: 2B looped "Selamat datang!" x100
             "stream_options": {"include_usage": True}}
     req = urllib.request.Request(url("/v1/chat/completions"), json.dumps(body).encode(),
@@ -270,17 +283,40 @@ def _ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wik
             "ttft": ttft, "first_sentence": first_sentence or total, "total": total, "tokens": n,
             "tok_s": timings.get("predicted_per_second") or (n / max(total - (ttft or 0), 1e-3)),
             "prompt_ms": timings.get("prompt_ms"), "cached": timings.get("cache_n"),
-            "lookup": look and {"keywords": look["keywords"], "ms": look["ms"],
-                                "titles": [ti for ti, _, _ in look["passages"]]}}
+            "lookup": look and {"title": look["title"], "ms": look["ms"]}}
 
 
-def _grammar(text):
-    """Only the actions this message asks for (INTENTS); with none, the grammar allows no tag at all."""
+# Every reply starts with one of these short openers (24 Oct): the voice has them pre-recorded in
+# every mood, so ARC is heard ~0.3 s after the model's first word instead of ~2 s (synthesising the
+# first phrase while the model still uses the GPU). "Preface generation" for dialogue robots.
+OPENERS = {
+    "visitor": ["Ah,", "Well,", "Oh,", "Hmm,", "Hello!", "Hello and welcome!", "Splendid!", "Of course!",
+                "Wonderful!", "I see.", "Ah, good question.", "Oh, I'm sorry to hear that."],
+    "owner": ["Certainly, sir.", "Right, sir.", "Well, sir,", "Ah, sir,", "Oh dear, sir.", "Of course, sir.",
+              "Splendid, sir!", "Hmm, sir,", "Good to hear you, sir.", "As you wish, sir."],
+}
+
+
+def _openers_for(q, owner):
+    """Greeting openers only when the visitor greets (24 Oct: "Tell me about wayang kulit" got "Hello!")."""
+    greeted = bool(re.search(INTENTS["greet"], q, re.I))
+    return [o for o in OPENERS["owner" if owner else "visitor"] if greeted or not o.lower().startswith(("hello", "good to"))]
+
+
+def _opener_rule(openers):
+    return "opener ::= " + " | ".join(json.dumps(o) for o in openers) + "\n"
+
+
+def _grammar(text, openers=None):
+    """Only the actions this message asks for (INTENTS); with none, the grammar allows no tag at all.
+    With openers: the spoken text must start with one of them."""
     from iro.skills import Body
     acts = {k: v for k, v in topic()["actions"].items() if re.search(INTENTS.get(k, r"$^"), text, re.I)}
+    text_rule = 'text ::= opener " " [^<]*\n' + _opener_rule(openers) if openers else 'text ::= [^<]*\n'
     if not acts:
-        return 'root ::= mood? [^<]*\n' + MOOD_RULE
-    return Body().grammar(acts).replace("root ::= act? text", "root ::= act? mood? text") + MOOD_RULE
+        return 'root ::= mood? text\n' + text_rule + MOOD_RULE
+    g = Body().grammar(acts).replace("root ::= act? text", "root ::= act? mood? text")
+    return g.replace('text ::= [^<]*\n', text_rule) + MOOD_RULE
 
 
 # Only in owner turns (23 Oct: with both modes in the persona, the 2B model called visitors "sir").
@@ -318,7 +354,18 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     # look / show: a fixed first line, then the skill, then the model speaks from the REAL result
     # (23 Oct: both 2B and 4B "saw" a doll / a USB drive before the camera had looked)
     sensing = next((k for k in ("look", "show") if re.search(INTENTS[k], q, re.I)), None)
-    if sensing:
+    # facts (ARC Lite, 24 Oct): the Wikipedia sentence itself, spoken with a short opener. The 2B
+    # model ignored a correct reference and asked "Who did you think founded Malacca?"
+    fact = None if sensing or not needs_lookup(q) else _fact(q, owner)
+    if fact:
+        on_mood and on_mood(None)
+        on_text and on_text(fact["text"])
+        a = {"text": fact["text"], "act": None, "mood": None, "first_sentence": 0.0, "total": 0.0, "ttft": 0.0,
+             "tok_s": 0, "lookup": {"title": fact["title"], "ms": fact["ms"]}}
+        hist.append({"role": "assistant", "content": fact["text"]})
+        out = [a]
+        sensing = "fact"
+    if sensing and sensing != "fact":
         tag = "look" if sensing == "look" else next((t for t in body.menu(topic()["actions"]) if t.startswith("show:")
                                                      and _object_named(t, q)), None)
         if tag:
@@ -331,7 +378,8 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
         else:
             sensing = None
     if not sensing:
-        a = ask(hist[-7:], lang=lang, on_text=on_text, state=f"{body.state()}. {who}", on_mood=on_mood)
+        a = ask(hist[-7:], lang=lang, on_text=on_text, state=f"{body.state()}. {who}", on_mood=on_mood,
+                openers=_openers_for(q, owner))
         hist.append({"role": "assistant", "content": a["text"]})
         out = [a]
     if a["act"]:
@@ -354,6 +402,39 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
                 total=round(x["total"], 3), tok_s=round(x.get("tok_s") or 0, 1),
                 lookup=json.dumps(x.get("lookup"), ensure_ascii=False))
     return out
+
+
+FACT_OPENERS = {"visitor": ["Ah, good question.", "Well,", "Here is what I know.", "Let me tell you."],
+                "owner": ["Right, sir.", "Certainly, sir.", "Well, sir,", "As it happens, sir,"]}
+
+
+LAST_FACT = {}                                     # the article ARC last answered from (for "tell me more")
+
+
+def _fact(q, owner):
+    """{text, title, ms}: a spoken answer made directly from the article's summary, or None.
+    "Tell me more" (no new topic) continues the same article with its next sentences."""
+    import random
+    from iro.wiki import summary, topic_words
+    if MORE.search(q) and LAST_FACT.get("sents") and not topic_words(q):
+        i = LAST_FACT["pos"]
+        nxt = LAST_FACT["sents"][i:i + 2]
+        if not nxt:
+            return {"text": "That is all my encyclopedia says in its summary, I'm afraid.", "title": LAST_FACT["title"],
+                    "ms": 0}
+        LAST_FACT["pos"] = i + 2
+        s = {"title": LAST_FACT["title"], "text": " ".join(nxt), "ms": 0}
+    else:
+        s = summary(q, "en")
+        if not s:
+            return None
+        LAST_FACT.update(title=s["title"], sents=s.get("sents", []), pos=s.get("next", 2))
+    text = s["text"]
+    if len(text) > 330:                            # keep it speakable: the first two sentences, trimmed
+        text = text[:330].rsplit(",", 1)[0].rstrip(" ,;") + "."
+    opener = random.choice(FACT_OPENERS["owner" if owner else "visitor"])
+    sep = " " if opener.endswith(",") else " "
+    return {"text": f"{opener}{sep}{text}", "title": s["title"], "ms": s["ms"]}
 
 
 def _object_named(tag, q):
