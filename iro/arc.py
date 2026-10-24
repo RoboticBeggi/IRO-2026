@@ -97,7 +97,9 @@ def needs_lookup(q):
     """Will this question go to offline Wikipedia? (the voice says "let me think" right away if so)"""
     # only real questions: "I like your voice" went to Wikipedia and came back as a Korean TV show (24 Oct)
     from iro.wiki import topic_words
-    if not cfg().get("wiki") or card_topic(q) or small_talk(q) or re.search(r"\b(you|your|yourself|arc)\b", q, re.I):
+    about_arc = r"\b(who|what|how) are you\b|\byour(self)?\b|\babout you\b|\barc\b"   # "do you know..." is fine
+    history = bool(re.search(r"\bhistory of\b", q, re.I))    # the cards hold no history: always look it up
+    if not cfg().get("wiki") or (card_topic(q) and not history) or small_talk(q) or re.search(about_arc, q, re.I):
         return False
     if MORE.search(q) and LAST_FACT.get("sents") and not topic_words(q):
         return True                                # "tell me more" continues the last article
@@ -273,8 +275,11 @@ def _ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wik
             if first_sentence is None and re.search(r"[.!?](\s|$)", text):
                 first_sentence = time.time() - t0  # TTS can start speaking here
             if on_text and len(text) > spoken_upto:
-                on_text(text[spoken_upto:])
+                more = on_text(text[spoken_upto:])
                 spoken_upto = len(text)
+                if more is False:                 # the voice has said all it will say: stop generating
+                    break                         # (closing the stream stops the server; 24 Oct it kept
+                    #                               writing 10 s past the word limit and slowed the voice)
     total = time.time() - t0
     act, mood, text, _ = split_tags(raw)
     text = re.sub(r"[*_#`]+|[\U0001F000-\U0001FAFF\u2600-\u27BF]", "", text).strip()  # spoken
@@ -360,6 +365,7 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     if fact:
         on_mood and on_mood(None)
         on_text and on_text(fact["text"])
+        on_text and on_text("")                    # "" = no more model writing for now (the voice may use the GPU)
         a = {"text": fact["text"], "act": None, "mood": None, "first_sentence": 0.0, "total": 0.0, "ttft": 0.0,
              "tok_s": 0, "lookup": {"title": fact["title"], "ms": fact["ms"]}}
         hist.append({"role": "assistant", "content": fact["text"]})
@@ -372,6 +378,7 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
             line = {"ms": "Sebentar, biar saya lihat.", "de": "Moment, ich schaue mal."}.get(
                 lang, "Let me take a look." if tag == "look" else "One moment, let me get it.")
             on_text and on_text(line)
+            on_text and on_text("")
             a = {"text": line, "act": tag, "first_sentence": 0.0, "total": 0.0, "ttft": 0.0, "tok_s": 0}
             hist.append({"role": "assistant", "content": f"<act>{tag}</act> {line}"})
             out = [a]
@@ -380,6 +387,7 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     if not sensing:
         a = ask(hist[-7:], lang=lang, on_text=on_text, state=f"{body.state()}. {who}", on_mood=on_mood,
                 openers=_openers_for(q, owner))
+        on_text and on_text("")
         hist.append({"role": "assistant", "content": a["text"]})
         out = [a]
     if a["act"]:
@@ -406,6 +414,11 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
 
 FACT_OPENERS = {"visitor": ["Ah, good question.", "Well,", "Here is what I know.", "Let me tell you."],
                 "owner": ["Right, sir.", "Certainly, sir.", "Well, sir,", "As it happens, sir,"]}
+
+
+def all_openers():
+    """Every opener a reply can start with (the voice pre-records each in every mood)."""
+    return sorted({o for d in (OPENERS, FACT_OPENERS) for v in d.values() for o in v})
 
 
 LAST_FACT = {}                                     # the article ARC last answered from (for "tell me more")

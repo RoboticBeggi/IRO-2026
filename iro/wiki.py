@@ -319,10 +319,16 @@ def _resolve(a, path, q):
             qs = _qstems(q)
             ctx = {_stem(w) for w in CONTEXT}
             best, best_s = None, -1
-            for href, li in re.findall(r'<li><a href="([^"#]+)"[^>]*>.*?</a>(.*?)</li>', raw, flags=re.S):
+            items = []                             # entries may start with text: "The <a>History of the US</a>"
+            for li in re.findall(r"<li>(.*?)</li>", raw, flags=re.S):
+                m = re.search(r'<a href="([^"#]+)"', li)
+                if m:
+                    items.append((m.group(1), li))
+            for k, (href, li) in enumerate(items):
                 st = {_stem(w) for w in re.findall(r"[a-z]+", (html.unescape(_TAG.sub(" ", li)) + " " +
                                                              href.replace("_", " ")).lower())}
-                sc = 3 * len(qs & st) + len(ctx & st)  # the question's words count most; context breaks ties
+                # the question's words count most, context breaks ties, Wikipedia lists the main meaning first
+                sc = 3 * len(qs & st) + len(ctx & st) + (4 if k == 0 else 0)
                 if sc > best_s:
                     best, best_s = href, sc
             if best and a.has_entry_by_path(best):
@@ -355,13 +361,15 @@ def summary(q, lang="en", n=2):
     if not arcs:
         return None
     a = arcs[0]
-    paths = []
+    paths, preferred = [], set()
     for cand in _candidates(q):
         forms = [cand.replace(" ", "_"), cand.title().replace(" ", "_"), cand.capitalize().replace(" ", "_")]
         forms += ["The_" + f for f in forms]
         for v in dict.fromkeys(forms):
             if len(v) > 2 and a.has_entry_by_path(v) and v not in paths:
                 paths.append(v)
+                if cand.lower().startswith("history of"):
+                    preferred.add(v)               # asked for the history: that article wins
         if len(paths) >= 3:
             break
     words = " ".join(w for w in re.findall(r"\w+", q) if w.lower() not in QWORDS)
@@ -383,6 +391,10 @@ def summary(q, lang="en", n=2):
             len(qs & {_stem(w) for w in re.findall(r"[a-z]+", title.lower())}) - 0.1 * rank
         if re.search(r"\((film|song|album|TV|band|novel|video game|soundtrack)", title):
             score -= 2                             # the thing itself, not a film named after it
+        if "disambiguation" in title.lower() or "may refer to" in " ".join(sents[:1]):
+            continue                               # a list of meanings is never the answer
+        if path in preferred:
+            score += 5
         if best is None or score > best[0]:
             best = (score, title, sents)
     if best is None or best[0] <= 0:

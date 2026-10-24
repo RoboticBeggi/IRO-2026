@@ -53,6 +53,7 @@ UNFINISHED = re.compile(r"(,|\b(and|but|or|so|because|the|a|an|of|to|with|for|my
 ACKS = {"visitor": ["Hmm, let me think.", "Ah, good question. One moment.", "Let me see what I know."],
         "owner": ["One moment, sir.", "Hmm, let me look that up, sir.", "Certainly, sir. Thinking."]}
 TEMPS = {None: 0.7, "amused": 0.95, "excited": 0.95, "curious": 0.85, "concerned": 0.75, "warm": 0.8, "proud": 0.85}
+WORDS_PER_S = 2.6                                   # the Jarvis voice speaks ~155 words a minute
 BREATH_S = 0.25                                     # natural pause between parts (#15)
 
 
@@ -233,11 +234,20 @@ class Voice:
         self.cache = {}
         self.cache_dir = Path.home() / "voice-samples" / "cache" / self.voice
         self.text_q, self.audio_q = queue.Queue(), queue.Queue()
-        self.pending = 0
+        self.pending, self.queued_s = 0, 0.0
         self.lock = threading.Lock()
         self.play_until = 0.0
         self.first_audio = None
+        self.underruns = 0
+        self.timeline = []                         # (wall-clock start, seconds, audio) of each spoken chunk
+        self.rtf = 1.0                             # voice seconds of work per second of speech (measured)
         self.stop_flag = threading.Event()
+        # the GPU is shared: voice and LLM together each run at half speed (24 Oct: voice RTF 0.84 ->
+        # 1.55, LLM 25 -> 12 tok/s), which made the voice slower than speech and left 2-5 s holes.
+        # So new speech waits until the LLM has finished (pre-recorded lines need no GPU and play at
+        # once); the voice then runs alone, faster than real time, and never runs dry.
+        self.gpu_free = threading.Event()
+        self.gpu_free.set()
         self.wavs = []
         self.player = None
         threading.Thread(target=self._synth, daemon=True).start()
@@ -294,7 +304,17 @@ class Voice:
             return
         with self.lock:
             self.pending += 1
+            self.queued_s += self._est(text)
         self.text_q.put((text, lang, mood))
+
+    @staticmethod
+    def _est(text):
+        return len(text.split()) / WORDS_PER_S
+
+    def ahead(self):
+        """Seconds of speech still to come: playing now + queued + being made."""
+        with self.lock:
+            return max(0.0, self.play_until - time.time()) + self.queued_s
 
     def _synth(self):
         while True:
@@ -303,9 +323,13 @@ class Voice:
                 if (text, mood) in self.cache:
                     self.audio_q.put(self.cache[(text, mood)])
                 else:
+                    self.gpu_free.wait(timeout=20)
+                    self.audio_q.put(("part", self._est(text)))
+                    t0, made = time.time(), 0
                     head = True                    # trim the silence the voice adds at the start
                     tail = np.zeros(0, np.int16)
                     for a in self._stream(text, mood, lang):
+                        made += len(a)
                         if self.stop_flag.is_set():
                             break
                         if head:
@@ -322,11 +346,14 @@ class Voice:
                             tail = a
                     loud = np.flatnonzero(np.abs(tail) > 250)
                     self.audio_q.put(tail[: loud[-1] + 720] if len(loud) else tail[:0])
+                    if made > OUT_RATE and not self.stop_flag.is_set():
+                        self.rtf = 0.6 * self.rtf + 0.4 * (time.time() - t0) / (made / OUT_RATE)
             except Exception as e:                 # noqa: BLE001 - skip this part, keep talking
                 print(f"\n(voice problem: {e})")
             self.audio_q.put(None)                 # end of part: a breath follows
             with self.lock:
                 self.pending -= 1
+                self.queued_s = max(0.0, self.queued_s - self._est(text))
 
     def _sink(self):
         """The configured output if it exists, else the default, else any: an HDMI screen drops its audio
@@ -359,12 +386,39 @@ class Voice:
         except BrokenPipeError:
             self.player = None
 
+    def _hold_for(self, est_s):
+        """Seconds of audio to gather before a part starts (jitter buffer). The voice is slower than
+        real time while the LLM shares the GPU (RTF 1.1-1.3, 24 Oct: the speech broke up mid-sentence):
+        start late enough that generation finishes before playback catches up with it. The server also
+        sends audio in ~0.5 s bursts, so at least one burst's worth is always held (the cached opener
+        usually plays meanwhile, so this rarely delays the first sound)."""
+        r = self.rtf * 1.15                        # a little safety
+        return min(est_s, 0.6 + max(0.0, est_s * (r - 1) / r))
+
     def _play(self):
-        got = []
+        got, held, hold = [], [], 0.0
         while True:
             a = self.audio_q.get()
             if self.stop_flag.is_set():
-                got = []
+                got, held, hold = [], [], 0.0
+                continue
+            if isinstance(a, tuple):               # a new part begins: how much to buffer first
+                hold = self._hold_for(a[1])
+                continue
+            if hold:
+                if a is not None:
+                    held.append(a)
+                    ahead = max(0.0, self.play_until - time.time())   # what is still playing covers part
+                    if sum(map(len, held)) / OUT_RATE < hold - ahead:
+                        continue
+                if held:
+                    self._out(np.concatenate(held), got)
+                held, hold = [], 0.0
+                if a is not None:
+                    continue
+            if a is not None and len(a) and got and time.time() > self.play_until + 0.06:   # pacat holds 60 ms
+                self.underruns += 1                # ran dry mid-part anyway: gather 0.5 s again, so
+                held, hold = [a], 0.5              # it is one short pause, not a stutter
                 continue
             if a is None:                          # end of a part: a short natural breath
                 if got:
@@ -372,11 +426,29 @@ class Voice:
                     got = []
                     self._write(np.zeros(int(OUT_RATE * BREATH_S), np.int16))
                 continue
-            if len(a):
-                if self.first_audio is None:
-                    self.first_audio = time.time()
-                got.append(a)
-                self._write(a)
+            self._out(a, got)
+
+    def _out(self, a, got):
+        if len(a):
+            if self.first_audio is None:
+                self.first_audio = time.time()
+            self.timeline.append((max(self.play_until, time.time()), len(a) / OUT_RATE, a))
+            got.append(a)
+            self._write(a)
+
+    def heard_as(self, t0):
+        """What the listener actually heard since t0, silences included (the said_ clips leave out the
+        waits between parts, which is where the long pauses hide), and the longest silence."""
+        tl = [x for x in self.timeline if x[0] >= t0]
+        if not tl:
+            return np.zeros(0, np.int16), 0.0
+        out = np.zeros(int((tl[-1][0] + tl[-1][1] - t0) * OUT_RATE) + 1, np.int16)
+        for st, d, a in tl:
+            i = int((st - t0) * OUT_RATE)
+            out[i:i + len(a)] = a[: len(out) - i]
+        ends = [st + d for st, d, _ in tl]
+        longest = max([b[0] - e for b, e in zip(tl[1:], ends)] + [0.0])
+        return out, longest
 
     def speaking(self, tail=0.3):
         with self.lock:
@@ -393,27 +465,32 @@ class Voice:
             except queue.Empty:
                 pass
         with self.lock:
-            self.pending = 0
+            self.pending, self.queued_s = 0, 0.0
         if self.player:
             self.player.kill()
             self.player = None
         self.play_until = 0.0
+        self.gpu_free.set()
         time.sleep(0.05)
         self.stop_flag.clear()
 
 
 class Splitter:
-    """Streamed reply -> the first clause at once (#4), the rest as one paragraph (#12). If the reply
-    grows long before it ends, it is flushed at sentence ends so the voice never runs dry."""
+    """Streamed reply -> the first clause at once (#4), the rest in as few parts as possible (#12),
+    but a finished sentence goes out at once whenever the voice is about to run dry: 24 Oct the
+    LLM wrote slower than ARC spoke and waiting for 220 characters left 2-7 s silences."""
+
+    LOW_S = 2.5                                    # less speech than this still to come: hand over now
 
     MAX_WORDS = 45                                 # the 2B ignores "about 35 words": spoke 16.8 s (24 Oct)
 
     def __init__(self, voice, lang, mood_ref):
-        from iro.arc import OPENERS
+        from iro.arc import all_openers
         self.voice, self.lang, self.mood = voice, lang, mood_ref
         self.buf, self.first_done, self.opener_done = "", False, False
-        self.openers = sorted({o for v in OPENERS.values() for o in v}, key=len, reverse=True)
+        self.openers = sorted(all_openers(), key=len, reverse=True)
         self.said_words, self.done = 0, False
+        voice.gpu_free.clear()                     # the LLM may be about to write: new speech waits (see Voice)
 
     def _say(self, text):
         if self.done:
@@ -431,10 +508,20 @@ class Splitter:
         self.voice.say(text, self.lang, self.mood["mood"])
 
     def feed(self, s):
+        """Returns False once the word limit is spoken: the caller can stop the model. "" means the
+        model has stopped writing: the voice may have the GPU now."""
+        if not s:
+            self.voice.gpu_free.set()
+        self._feed(s)
+        return not self.done
+
+    def _feed(self, s):
         self.buf += s
         if not self.opener_done:                   # the pre-recorded opener goes out the moment it is written
             lead = self.buf.lstrip()
             hit = next((o for o in self.openers if lead.startswith(o + " ")), None)
+            if hit and any(o.startswith(lead.rstrip()) and len(o) > len(hit) for o in self.openers):
+                return                             # "Well," may still become "Well, sir," (24 Oct)
             if hit:
                 self._say(hit)
                 self.buf, self.opener_done = lead[len(hit) + 1:], True
@@ -449,7 +536,7 @@ class Splitter:
                 cut = m.end()
                 self._say(self.buf[:cut])
                 self.buf, self.first_done = self.buf[cut:], True
-        elif len(self.buf) > 220:                  # long story: hand over whole sentences as they come
+        elif len(self.buf) > 220 or self.voice.ahead() < self.LOW_S:   # whole sentences, as they come
             parts = re.split(r"(?<=[.!?])\s+", self.buf)
             if len(parts) > 1:
                 self._say(" ".join(parts[:-1]))
@@ -458,6 +545,7 @@ class Splitter:
     def flush(self):
         self._say(self.buf)
         self.buf = ""
+        self.voice.gpu_free.set()
 
 
 # ------------------------------------------------------------------ hear (mic array)
@@ -549,9 +637,8 @@ def main():
     start_whisper()
     greet = topic()["greeting"]["en"]
     voice = Voice(lines=[greet])
-    from iro.arc import OPENERS
-    voice.precache([(o, m) for o in sorted({x for v in OPENERS.values() for x in v})
-                    for m in [None] + sorted(voice.moods)])
+    from iro.arc import all_openers
+    voice.precache([(o, m) for o in all_openers() for m in [None] + sorted(voice.moods)])
     # warm everything once (#8, #9): Wikipedia's index from disk, Whisper, ARC's prompt cache
     try:
         from iro.wiki import archives, search
@@ -579,11 +666,25 @@ def main():
           f"{stt_lang()}). Speak to it. Ctrl+C to stop.\nARC: {greet}")
     ring.show("speaking")
     voice.say(greet)
-    k = 0
+    k, last = 0, None
+
+    def keep_reply():                              # the reply as the listener heard it, silences and all
+        pcm, longest = voice.heard_as(last[1])
+        with wave.open(str(r.dir / f"reply_{last[0]:03d}.wav"), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(OUT_RATE)
+            w.writeframes(pcm.tobytes())
+        r.log("reply", k=last[0], seconds=round(len(pcm) / OUT_RATE, 1), longest_silence=round(longest, 2))
+        voice.timeline.clear()
+
     try:
         while True:
             while voice.speaking():
                 time.sleep(0.05)
+            if last:
+                keep_reply()
+                last = None
             ring.show("listening")
             u = ears.next()
             t0 = time.time()
@@ -623,7 +724,7 @@ def main():
             def on_text(s):
                 s = re.sub(r"[*_#`]+|[\U0001F000-\U0001FAFF☀-➿]", "", s)   # spoken: no markdown/emoji
                 print(s, end="", flush=True)
-                split.feed(s)
+                return split.feed(s)
 
             print("ARC: ", end="", flush=True)
             ring.show("speaking")
@@ -641,10 +742,13 @@ def main():
                   t_transcribe=round(t_heard, 2), t_first_audio=round(first, 2), ack=int(ack),
                   t_think=round(time.time() - t_think, 2), mood=mood["mood"] or "",
                   reply=" ".join(x["text"] for x in replies), act=replies[0].get("act") or "")
+            last = (k, t0)
             k += 1
     except KeyboardInterrupt:
         pass
     finally:
+        if last:
+            keep_reply()
         ears.close()
         if mic:
             mic.close()
