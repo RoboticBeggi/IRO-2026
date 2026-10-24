@@ -36,8 +36,12 @@ SHORT_OK = set("yes no yeah yep nope okay ok hello hi hey thanks thank bye goodb
 COMMANDS = [   # (kind, pattern, owner only) - matched on the whole (short) utterance
     ("repeat", r"^(what|pardon( me)?|sorry|come again|say (that|it) again|repeat( that| it)?( please)?|again|"
                r"what did you say|i didn'?t (catch|hear) (that|you)|one more time)( please)?\W*$", False),
-    ("go_on", r"^(please )?(go on|continue|carry on|keep going|go ahead|as you were( saying)?|you were saying|"
-              r"sorry,? (go on|continue))( please)?\W*$", False),
+    # "please continue explaining", "go on with the story", "pick up where you left off", "where were we?"
+    ("go_on", r"^((please|okay|ok|yes|yeah|so|sorry|now|arc)[ ,]+)*(can you |could you |would you )?"
+              r"((go on|continue|carry on|keep (going|explaining|talking|telling)|resume|proceed)\b.*|"
+              r"(go ahead|as you were( saying)?|you were saying|where were we|finish (what you were saying|"
+              r"the story|explaining)|pick up where you (left off|stopped)|(where|from where) you (left off|stopped))"
+              r"\b.*)$", False),
     ("louder", r"\b(louder|speak up|turn (it )?up|volume up|i can'?t hear you)\b", False),
     ("softer", r"\b(quieter|softer|too loud|turn (it )?down|volume down|lower your voice)\b", False),
     ("shorter", r"\b(keep (it|them) short|shorter( answers)?|be brief|too long|short answers)\b", False),

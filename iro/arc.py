@@ -388,9 +388,11 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     sensing = next((k for k in ("look", "show") if re.search(INTENTS[k], q, re.I)), None)
     # facts (ARC Lite, 24 Oct): the Wikipedia sentence itself, spoken with a short opener. The 2B
     # model ignored a correct reference and asked "Who did you think founded Malacca?"
-    fact = None
-    sum_ = None if sensing else _math(q)
-    if sum_:
+    fact = None if sensing else _dialogue(q, owner, lang)
+    sum_ = None if sensing or fact else _math(q)
+    if fact:
+        pass
+    elif sum_:
         fact = {"text": ("Easy, sir. " if owner else "") + sum_[0].upper() + sum_[1:], "title": "(worked out)", "ms": 0}
     elif not sensing and re.search(RANDOM, q, re.I):    # "give me a random fact (about the UK)"
         fact = _random_fact(q, owner)
@@ -398,8 +400,11 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
         fact = _fact(q, owner)
     elif not sensing:                                  # a bare topic: "United Kingdom", "Mozart?"
         fact = _bare_topic(q, owner)
+    if not fact and not sensing and re.search(INTENTS["perform"], q, re.I) and \
+            re.search(r"\b(can you|could you|please|show me|let'?s see|will you|would you|do a|perform|dance)\b", q, re.I):
+        fact = {"text": "With pleasure" + (", sir." if owner else "!"), "title": "(perform)", "ms": 0, "act": "perform"}
     if not fact and not sensing:
-        fact = _card_fact(q, owner) or _courtesy(q, owner)
+        fact = _card_fact(q, owner) or _courtesy(q, owner) or _unclear(q, owner)
     if fact:
         on_mood and on_mood(None)
         on_text and on_text(fact["text"])
@@ -425,13 +430,22 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
     if not sensing:
         a = ask(hist[-7:], lang=lang, on_text=on_text, state=f"{body.state()}. {who}", on_mood=on_mood,
                 openers=_openers_for(q, owner))
+        if len(re.findall(r"\w+", a["text"])) < 5 and not a["act"]:   # "Right": it understood nothing
+            extra = " Sorry, I didn't catch that. Could you say it again?"
+            on_text and on_text(extra)
+            a["text"] += extra
         on_text and on_text("")
         hist.append({"role": "assistant", "content": a["text"]})
         out = [a]
     if a["act"]:
         report = body.run(a["act"])
         a["report"] = report
-        if a["act"].split(":")[0] in ("look", "show") or (report.startswith("could not") and a["act"] != "bow"):
+        if report.startswith("could not") and a["act"].split(":")[0] not in ("look", "show"):
+            if a["act"] != "bow":                  # a short honest line, not a second ramble
+                line = "Sorry, I couldn't do that move just now."
+                on_text and on_text("\n" + line)
+                out.append({"text": line, "act": None, "first_sentence": 0.0, "total": 0.0, "ttft": 0.0, "tok_s": 0})
+        elif a["act"].split(":")[0] in ("look", "show"):
             on_text and on_text("\n")
             hist.append({"role": "user", "content": f"(Robot report: {report}. Tell the speaker in one or "
                                                     "two sentences what really happened, using ONLY this report; "
@@ -441,6 +455,7 @@ def respond(body, hist, q, lang=None, on_text=None, log=None, owner=False, on_mo
                     on_mood=on_mood)
             hist.append({"role": "assistant", "content": b["text"]})
             out.append(b)
+    note_said(" ".join(x["text"] for x in out))
     if log:
         for x in out:
             log("turns", q=q, lang=lang or "", reply=x["text"], act=x.get("act") or "", report=x.get("report", ""),
@@ -523,6 +538,112 @@ def small_talk_only(q):
     """Greetings, thanks, yes/no: never a topic."""
     return bool(re.search(INTENTS["greet"] + "|" + INTENTS["bow"] + r"|^\W*(yes|no|okay|ok|sure|maybe|nope|yeah)\b",
                           q, re.I))
+
+
+# ------------------------------------------------------------------ the conversation itself
+# How a person would answer (24 Oct, the owner's session reverse-engineered): remember what you just
+# offered and talked about; "sure" takes the offer, "anything more" continues, "I don't understand"
+# gets it again more simply, "what topics" gets the list, and nonsense gets "say that again".
+
+DIALOG = {"offer": None, "last": ""}
+AFFIRM = re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok|okay|please|go ahead|of course|why not|alright|all right|"
+                    r"sounds good|tell me|i would|i'd like that)\b", re.I)
+DENY = re.compile(r"^\W*(no|nope|not really|no thanks|no thank you|nah)\W*$", re.I)
+CONTINUE = re.compile(r"\b(anything (more|else)|what else|more|go on|continue|keep (going|explaining|talking|telling)|"
+                      r"carry on|resume|and then|and\?|tell me more|next|where were we|you were saying|"
+                      r"where you (left off|stopped)|finish (the story|explaining|what you were saying))\b", re.I)
+CONFUSED = re.compile(r"\b(i (do not|don't|didn't|did not) (understand|get it|follow)|what do you mean|what are you "
+                      r"(talking|chanting|saying|on) about|(makes|made) no sense|doesn'?t make (any )?sense|"
+                      r"i'?m confused|say it (simply|simpler)|in simple words)\b", re.I)
+TOPICS = re.compile(r"\b(what (kind of |other )?(topics?|things|subjects)|what can you (tell|talk|teach)|"
+                    r"what can i ask|what do you know( about)?\W*$|what are you about)\b", re.I)
+
+
+def note_said(text):
+    """After every reply: what ARC said, and anything it offered ("Would you like to hear about shadow
+    puppets?") so a plain "sure" takes the offer."""
+    DIALOG["last"] = text
+    m = re.search(r"(would you like|do you want|shall i tell you)[^?]*?\b(?:hear|know|learn|tell you)\s+(more\s+)?"
+                  r"(?:about\s+)?([^?.!]+)\?", text, re.I)
+    DIALOG["offer"] = None if not m else ("more" if m.group(2) else m.group(3).strip())
+
+
+def card_list():
+    names = []
+    for c in topic()["cards"]:
+        if c == "arc_robot":
+            continue
+        meta, _ = card(c)
+        names.append(re.sub(r"\s*\(.*\)", "", (meta.get("names") or [meta.get("title", c)])[0]))
+    return names
+
+
+def _dialogue(q, owner, lang):
+    """A turn about the conversation itself, answered like a person would; None = not one of those."""
+    words = len(re.findall(r"\w+", q))
+    sir = ", sir" if owner else ""
+    if CONFUSED.search(q) and DIALOG["last"]:     # the gist again, short (the 2B's rewrite rambled)
+        body = re.sub(r"^(\W*(" + "|".join(re.escape(o) for o in all_openers()) + r"|also,|what's more,)\s*)+", "",
+                      DIALOG["last"], flags=re.I)
+        first = re.split(r"(?<=[.!?])\s+", body.strip())[0]
+        if len(first.split()) > 14:
+            first = first.split(",")[0].rstrip(".") + "."
+        return {"text": f"Sorry{sir}. In short: {first[:1].lower() + first[1:]}", "title": "(simpler)", "ms": 0}
+    if TOPICS.search(q):
+        names = card_list()
+        return {"text": f"I can tell you about {', '.join(names[:-1])} and {names[-1]}, and look up almost anything "
+                        f"else{sir}. Which one?", "title": "(topics)", "ms": 0}
+    # up to 12 words: "could you please continue explaining where you left off about the puppets"
+    if (words <= 12 and CONTINUE.search(q) and not _new_topic(q)) or \
+            (words <= 6 and AFFIRM.search(q) and DIALOG["offer"] == "more"):
+        nxt = _continue(owner)
+        if nxt:
+            return nxt
+    if words <= 6 and AFFIRM.search(q) and DIALOG["offer"] and DIALOG["offer"] != "more":
+        offer = DIALOG["offer"]
+        return _card_fact(f"Tell me about {offer}", owner) or _fact(f"Tell me about {offer}", owner)
+    if DENY.search(q) and DIALOG["offer"]:
+        DIALOG["offer"] = None
+        return {"text": f"Alright{sir}.", "title": "(no)", "ms": 0}
+    return None
+
+
+def _unclear(q, owner):
+    """A short phrase that is no question, request, greeting or known topic is most likely misheard
+    ("Fake you the same, Spotty", "Story killer robot": the 2B copied its last answer or rambled)."""
+    if len(re.findall(r"\w+", q)) > 5 or re.search(QUESTION, q, re.I) or small_talk_only(q) or \
+            any(re.search(p, q, re.I) for p in INTENTS.values()):
+        return None
+    return {"text": "Sorry" + (", sir" if owner else "") + ", I didn't catch that. Could you say it again?",
+            "title": "(unclear)", "ms": 0}
+
+
+def _new_topic(q):
+    """Does a "continue" sentence name something else ("continue with batik")? Then it is a new question."""
+    from iro.wiki import topic_words
+    rest = [w for w in topic_words(q) if not re.fullmatch(
+        r"(continue|continuing|explain\w*|talk\w*|tell\w*|story|left|off|stopped|where|were|we|saying|going|"
+        r"keep|carry|resume|finish\w*|go|anything|else|more|next|it|that|this|with|on)", w, re.I)]
+    title = LAST_FACT.get("title", "").lower()
+    return any(w.lower()[:5] not in title for w in rest)
+
+
+def _continue(owner):
+    """The next part of whatever ARC was last telling (card or encyclopedia)."""
+    import random
+    if not LAST_FACT.get("title"):
+        return None
+    i = LAST_FACT.get("pos", 0)
+    nxt = LAST_FACT.get("sents", [])[i:i + 2]
+    LAST_FACT["pos"] = i + 2
+    if not nxt:
+        return {"text": "That's all I know about it." + (" Anything else, sir?" if owner else " Anything else?"),
+                "title": LAST_FACT["title"], "ms": 0}
+    opener = random.choice(["Also,", "What's more,"])
+    first = nxt[0]
+    if first.split()[0].lower() in ("he", "she", "it", "they", "the", "this", "its", "his", "her", "a", "an", "many"):
+        first = first[:1].lower() + first[1:]
+    return {"text": f"{opener} {' '.join([first] + nxt[1:])}", "title": LAST_FACT["title"], "ms": 0}
 
 
 def _card_fact(q, owner):

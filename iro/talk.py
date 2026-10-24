@@ -952,6 +952,8 @@ def main():
           f"{stt_lang()}). Speak to it. Ctrl+C to stop.\nARC: {greet}")
     ring.show("speaking")
     voice.say(greet)
+    from iro.arc import note_said
+    note_said(greet)                               # "Would you like to hear about shadow puppets?" -> "sure"
     k, last = 0, None
 
     def keep_reply():                              # the reply as the listener heard it, silences and all
@@ -1011,6 +1013,10 @@ def main():
                     continue
                 text = rest
             kind, arg = convo.command(text, is_owner)
+            if kind == "go_on":
+                from iro.arc import _new_topic
+                if _new_topic(text):               # "continue with batik": a new question, not a resume
+                    kind = None
             if kind:
                 r.log("command", heard=text, kind=kind, arg=arg)
                 print(f"\n{'sir' if is_owner else 'visitor'}: {text}   [{kind}]")
@@ -1018,12 +1024,12 @@ def main():
                     voice.play_pcm(last_reply, "(again)") if last_reply is not None else \
                         voice.say(convo.LINES["no_repeat"])
                 elif kind == "go_on":
-                    if voice.unsaid:
+                    if voice.unsaid:               # cut off mid-answer: carry on exactly where it stopped
                         for t in voice.unsaid:
                             voice.say(t, mood=last_mood)
                         voice.unsaid = []
-                    else:
-                        voice.say(convo.LINES["no_go_on"])
+                    else:                          # it had finished: the next part of the topic (arc._dialogue)
+                        kind = None
                 elif kind in ("louder", "softer"):
                     voice.volume = float(np.clip(voice.volume * (1.3 if kind == "louder" else 0.75), 0.3, 2.5))
                     save_cfg(volume=round(voice.volume, 2))
@@ -1041,7 +1047,8 @@ def main():
                 elif kind == "note":
                     convo.add_note(arg or text)
                     voice.say(convo.LINES["note"])
-                continue
+                if kind:
+                    continue
             text = convo.strip_name(text)
             voice.earcon()                         # "heard you" (feature 8)
             voice.unsaid = []                      # a new reply: "go on" now refers to this one

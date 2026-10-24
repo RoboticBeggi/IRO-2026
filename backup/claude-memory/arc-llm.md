@@ -79,3 +79,11 @@ Fallback if still poor: a speaker on the reSpeaker's 3.5 mm jack, so its hardwar
 - New routes in respond: `_math` (exact sums), RANDOM "fun/random fact (about X)" -> `wiki.random_fact`, `_bare_topic` (a name alone, exact title only); "why" questions go to the LLM.
 - wiki: `about()` ("fact about the UK"), ALIAS, `how_subject()` + `singulars()` ("how do bees make honey" -> Bee), NAMESAKE first-sentence penalty (films, bands, games...), digits kept in topic words, 5 candidate paths. A 25-question check is all right; Strauss -> Eduard (minor).
 - Barge-in: the owner's voiceprint >= 0.80 interrupts (owner cut-ins scored 0.84-0.90, echo 0.53-0.69). Visitors need 3 new words, or 2 if one is a capitalised name. No ducking until a check looks like a person. Replaying the 21 saved checks: only the 3 owner cut-ins interrupt.
+
+**24 Oct, conversation layer (session 162820, rules reverse-engineered from how Claude would answer):**
+- `arc.DIALOG` keeps the last reply and ARC's offer (`note_said`; the greeting is noted in talk main).
+- `_dialogue` runs first: AFFIRM takes the offer; CONTINUE ("anything more/what else") gives the next card or wiki sentences (`_continue`); CONFUSED repeats the gist of the last reply with no LLM; TOPICS lists the cards; DENY says "Alright".
+- `_card_fact` answers heritage cards directly (one best line, or the first 2); `_courtesy` handles thanks/bye; `_unclear` answers a short non-question with "didn't catch that".
+- Perform/dance requests: fixed line + act; a failed move gets one short apology.
+- An LLM reply under 5 words gets "say it again" added.
+- Deterministic answers made the median first sound 0.82 s.
