@@ -9,7 +9,7 @@
     iro arc topic [NAME]             show / switch the sub-topic (arc/topics/NAME.yaml)
     iro arc check                    knowledge cards still to be verified by the team
     iro arc models                   the models in config/arc.yaml and which ones are downloaded
-    iro arc stop                     stop the model server (frees ~3 GB)
+    iro arc stop                     stop all of ARC's servers: model, Whisper, voice (frees ~3 GB)
 
 How it works: llama.cpp's llama-server runs the model on the GPU (localhost only). ARC's system
 prompt = persona + the topic's role + ALL its knowledge cards; it is the same for every question,
@@ -36,7 +36,7 @@ ARC = ROOT / "arc"
 CFG = ROOT / "config" / "arc.yaml"
 LANGS = {"ms": "Bahasa Melayu", "en": "English", "de": "German (Deutsch)"}
 ACT = re.compile(r"^\s*<act>\s*([A-Za-z_]+(?::[A-Za-z0-9_]+)?)\s*</act>\s*")
-MOODS = ("amused", "excited", "concerned")          # voices/<voice>-<mood>; no tag = calm (the main voice)
+MOODS = ("amused", "excited", "concerned", "warm", "curious", "proud")          # voices/<voice>-<mood>; no tag = calm (the main voice)
 MOOD = re.compile(r"^\s*<mood>\s*(" + "|".join(MOODS) + r")\s*</mood>\s*")
 MOOD_RULE = 'mood ::= "<mood>" (' + " | ".join(f'"{m}"' for m in MOODS) + ') "</mood> "\n'
 
@@ -75,6 +75,23 @@ def card(name):
 
 def topic(name=None):
     return yaml.safe_load((ARC / "topics" / f"{name or cfg()['topic']}.yaml").read_text())
+
+
+QUESTION = (r"\?|\b(what|who|whom|whose|when|where|why|how|which|tell me|explain|describe|apa|siapa|bila|"
+            r"mengapa|kenapa|bagaimana|ceritakan|was|wer|wann|wo|warum|wie|erz(ä|a)hl)\b")
+
+
+def small_talk(q):
+    """Greetings, thanks, goodbyes and very short remarks: no encyclopedia needed (24 Oct: "bye bye"
+    triggered a full Wikipedia lookup and took 57 s)."""
+    if re.search(QUESTION, q, re.I):
+        return False
+    return len(re.findall(r"\w+", q)) <= 3 or bool(re.search(INTENTS["greet"] + "|" + INTENTS["bow"], q, re.I))
+
+
+def needs_lookup(q):
+    """Will this question go to offline Wikipedia? (the voice says "let me think" right away if so)"""
+    return bool(cfg().get("wiki")) and not card_topic(q) and not small_talk(q)
 
 
 def card_topic(q):
@@ -149,7 +166,8 @@ def start(model=None, quiet=False):
            "-c", str(s["ctx"]), "-ngl", "99", "-fa", "on", "-np", "2", "--jinja",
            "--cache-reuse", "256", "--no-webui"] + [str(a) for a in m.get("args", [])]
     log = open(Path("/tmp") / "arc-server.log", "w")
-    subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    from iro.hw.system import expendable
+    expendable(subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True))
     t0 = time.time()
     while not healthy():
         if time.time() - t0 > 180:
@@ -165,7 +183,7 @@ def start(model=None, quiet=False):
 
 # ------------------------------------------------------------------ asking
 
-def ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wiki=True, state=None,
+def ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wiki=True, state=None,
         acts=True, _retry=True, on_mood=None):
     """See _ask. If the model server died (23 Oct: it dropped a connection once during a long test),
     restart it and try once more: a silent robot in front of the judges is the worst outcome."""
@@ -185,7 +203,7 @@ def running_key():
     return next((k for k, m in cfg()["models"].items() if m["file"] == name), None)
 
 
-def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wiki=True, state=None,
+def _ask(messages, lang=None, on_text=None, max_tokens=150, temperature=0.4, wiki=True, state=None,
          acts=True, on_mood=None):
     """Stream one reply. messages: chat history ending with the user's turn (system added here).
     Returns {text, act, lang, ttft, first_sentence, total, tokens, tok_s}. on_text(chunk) gets the
@@ -193,7 +211,7 @@ def _ask(messages, lang=None, on_text=None, max_tokens=220, temperature=0.4, wik
     t0 = time.time()                              # timings include the lookup: the visitor waits for both
     msgs = [{"role": "system", "content": system_prompt()}] + [dict(m) for m in messages]
     look = None
-    if wiki and cfg().get("wiki") and not card_topic(messages[-1]["content"]):
+    if wiki and needs_lookup(messages[-1]["content"]):
         # offline Wikipedia: the best paragraphs for this question. Not when the team's cards cover
         # it: 23 Oct the Indonesian wayang article overrode the Kelantan card (and it costs ~2.4 s)
         from iro.wiki import lookup
@@ -519,9 +537,11 @@ def main():
         return cmd_check()
     if sub == "models":
         return cmd_models()
-    if sub == "stop":
+    if sub == "stop":                              # everything ARC started: frees ~3 GB
         stop()
-        print("ARC model server stopped")
+        for name in ("llama-server", "whisper-server", "tts-server"):
+            subprocess.run(["pkill", "-x", name], check=False)
+        print("ARC stopped: language model, Wikipedia helper, Whisper and the voice server")
         return 0
     print(__doc__)
     return 1

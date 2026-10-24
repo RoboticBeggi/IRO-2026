@@ -94,6 +94,42 @@ all three languages.
 **Watch:** Malay is the go/no-go check for model choice. This is the most
 important result of week 1.
 
+**Status (24 Oct):** built as ARC (`iro arc talk`). Chosen: Whisper
+large-v3-turbo (STT), Qwen3.5-2B (LLM), Qwen3-TTS "Jarvis" voice designed
+with Voice Design and cloned (qwentts.cpp). English first. First test: answers
+started 10–24 s after the visitor stopped, with pauses between sentences.
+
+#### Voice upgrades (ranked; from the 24 Oct review of the recorded test)
+
+Speed:
+- [ ] 1. Whisper fixed to English (auto-detect: 1.6 s and turned English into Malay; fixed: 0.85 s, correct)
+- [ ] 2. One continuous audio stream for the whole conversation (no gap per sentence)
+- [ ] 3. Generate the next part while the current one plays (voice is 0.79x real time)
+- [ ] 4. Start speaking at the first clause, not the first full sentence
+- [ ] 5. Instant pre-recorded acknowledgements ("Hmm, let me think.") while looking things up
+- [ ] 6. Cache of common lines (greetings, goodbyes, skill lines) pre-recorded at start-up
+- [ ] 7. No Wikipedia lookup for small talk (greetings, thanks, goodbyes)
+- [ ] 8. Warm the Wikipedia index at start-up (cold disk: 1.8 s per first lookup)
+- [ ] 9. Warm all three models at start-up (first reply was slowest)
+- [ ] 10. Voice gets the GPU first: listening paused while speaking, writing finishes fast
+- [ ] 11. Shorter spoken replies (about 2 sentences, punchy first line)
+
+Naturalness:
+- [ ] 12. Rest of the reply synthesised as one paragraph (consistent intonation, ParaTTS)
+- [ ] 13. Speakable text: years, numbers, abbreviations, symbols, brackets
+- [ ] 14. Write for the ear: contractions, openers, varied sentence length, punctuation for pauses
+- [ ] 15. Even natural pauses: trim chunk silences, ~250 ms breath between parts
+- [ ] 16. Expressiveness tuned per mood (calmer calm, livelier amused/excited)
+- [ ] 17. More moods (warm, curious, proud) keeping the same voice (>= 0.85)
+- [ ] 18. Even loudness across moods
+
+Listening:
+- [ ] 19. Owner recognition: threshold 0.75 + keeps learning from confirmed owner turns (missed at 0.81)
+- [ ] 20. Smarter end of turn: wait a little longer when the sentence ends on "and", "the", a comma
+- [ ] 21. Barge-in: the visitor can interrupt ARC (needs 22)
+- [ ] 22. Hardware: speaker on the reSpeaker 3.5 mm jack, so the array's echo cancelling hears ARC
+- [ ] 23. LED ring shows listening / thinking / speaking
+
 ### 3. Turn to speaker (ReSpeaker XVF3800)
 
 The XVF3800 does DoA, beamforming, noise suppression and echo cancellation on

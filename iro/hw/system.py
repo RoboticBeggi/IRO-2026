@@ -101,3 +101,21 @@ def overcurrent_events() -> dict[str, int]:
     if not h:
         return {}
     return {f.name.split("_")[0]: read_int(f) or 0 for f in sorted(h.glob("oc*_event_cnt"))}
+
+
+def expendable(proc):
+    """Tell Linux to kill this process FIRST if memory runs out (oom_score_adj 1000). The Jetson's
+    7.6 GB is shared by CPU and GPU: on 24 Oct ARC's model servers filled it and the out-of-memory
+    killer took VS Code instead. Any user may raise their own process's score. Returns the process."""
+    try:
+        Path(f"/proc/{proc.pid}/oom_score_adj").write_text("1000")
+    except OSError:
+        pass
+    return proc
+
+
+def mem_available_mb() -> int:
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) // 1024
+    return 0

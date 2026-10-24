@@ -60,11 +60,21 @@ class Owner:
         self.ok = PRINT.exists()
         if self.ok:
             d = np.load(PRINT)
-            self.prints, self.threshold = d["prints"], float(d["threshold"])
+            # 24 Oct: the owner scored 0.81 in a real conversation and was missed (enrolled threshold
+            # 0.85); other voices stayed <= 0.70, so 0.75 still separates them
+            self.prints, self.threshold = d["prints"], min(float(d["threshold"]), 0.75)
 
     def score(self, pcm16):
         v = self.ears.embed(pcm16)
         return float(np.max(self.prints @ v))
+
+    def learn(self, pcm16, score, sure=0.82, keep=40):
+        """Add a turn the owner surely spoke (score >= sure) to the voiceprint: it keeps up with how he
+        sounds in real conversations (distance, mood, tiredness). Newest `keep` are kept."""
+        if not self.ok or score < sure or len(pcm16) < RATE * 1.5:
+            return
+        self.prints = np.vstack([self.prints, self.ears.embed(pcm16)])[-keep:]
+        np.savez(PRINT, prints=self.prints, threshold=self.threshold, date=time.strftime("%Y-%m-%d %H:%M"))
 
     def is_owner(self, pcm16, min_s=1.0):
         if not self.ok or len(pcm16) < RATE * min_s:

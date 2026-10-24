@@ -116,9 +116,11 @@ def start_embedder():
     c = cfg()
     exe = Path(os.path.expanduser(c["server"]["binary"]))
     model = Path(os.path.expanduser(c["model_dir"])) / c["embedder"]["file"]
-    subprocess.Popen([str(exe), "-m", str(model), "--port", str(EMB_PORT), "--host", "127.0.0.1",
-                      "--embedding", "-ngl", "99", "-c", "2048", "-b", "512", "-ub", "512", "--no-webui"],
-                     stdout=open("/tmp/arc-embed.log", "w"), stderr=subprocess.STDOUT, start_new_session=True)
+    from iro.hw.system import expendable
+    expendable(subprocess.Popen([str(exe), "-m", str(model), "--port", str(EMB_PORT), "--host", "127.0.0.1",
+                                 "--embedding", "-ngl", "99", "-c", "2048", "-b", "512", "-ub", "512", "--no-webui"],
+                                stdout=open("/tmp/arc-embed.log", "w"), stderr=subprocess.STDOUT,
+                                start_new_session=True))
     t0 = time.time()
     while not emb_healthy():
         if time.time() - t0 > 60:

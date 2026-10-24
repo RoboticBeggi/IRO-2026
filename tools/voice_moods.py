@@ -29,6 +29,9 @@ MOODS = {
     "amused": "Ha! Oh, that is rather funny, sir. I shall pretend I did not hear it... but I absolutely did.",
     "excited": "Oh, this is wonderful! A real wayang kulit puppet, right here in front of us! I can hardly wait!",
     "concerned": "Hmm. I am a little worried, sir... The arm is getting hot. Please, let it rest for a moment.",
+    "warm": "Ah, it is so good to see you again. Come, sit with me for a moment, and I will tell you a lovely story.",
+    "curious": "Oh? Now that is interesting... Where did you find it? Tell me more, I simply must know.",
+    "proud": "There. Every single puppet, carved by hand, and the story kept alive for a thousand years. Magnificent.",
 }
 SEEDS = [1, 2, 3, 4, 5, 6]
 
