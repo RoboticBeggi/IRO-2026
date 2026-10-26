@@ -283,27 +283,37 @@ def cmd_zone(args):
         print(__doc__)
         return 1
     name, nogo = args[1], "--nogo" in args
-    from iro.visitors import BG, Lidar, detect
+    from iro.record import run
+    from iro.visitors import BG, Lidar, Visitors
     if not BG.exists():
         raise SystemExit("Learn the empty room first: iro visitors learn")
-    d = np.load(BG)
+    rec = run(f"visitors-zone-{name}")
     secs = 20
     input(f"Zone '{name}': when you press Enter, walk slowly along the zone's edge for {secs} s "
-          "(or move a box / your feet around it). Enter: ")
+          "(nobody else in view). Enter: ")
+    vis = Visitors()
     lidar = Lidar()
-    pts, n, t0 = [], None, time.time()
+    paths, n, t0 = {}, None, time.time()
     try:
         while time.time() - t0 < secs:
-            n, (_, a, r) = lidar.read(n)
-            people = detect(a, r, d["med"], d["mad"], d["self_mask"])
-            pts += [(p[0], p[1]) for p in people]
-            print(f"\r  {secs - (time.time() - t0):4.0f} s left, {len(pts)} points", end="", flush=True)
+            n, (t, a, r) = lidar.read(n)
+            vis.step(t, a, r)
+            for tr in vis.visitors():               # only the tracked walker, not stray blobs
+                paths.setdefault(tr.id, []).append((float(tr.s[0]), float(tr.s[1])))
+            print(f"\r  {secs - (time.time() - t0):4.0f} s left, {sum(map(len, paths.values()))} points",
+                  end="", flush=True)
     finally:
         lidar.close()
     print()
+    pts = max(paths.values(), key=len, default=[])  # the person who walked the longest
     if len(pts) < 20:
-        print("Too few points: walk inside the lidar's view (knee height, within 6 m) and try again.")
+        print("Too few points: walk inside the lidar's view (within 6 m), slowly, and try again.")
         return 1
+    area = cv2.contourArea(np.asarray(hull(pts, 0.0), np.float32))
+    if area > 9:
+        print(f"That zone would be {area:.0f} m2: too big for one artefact. Was someone else moving? Try again.")
+        return 1
+    rec.note(f"zone {name}: {len(pts)} points from visitor path, {area:.1f} m2")
     z[name] = {"kind": "nogo" if nogo else "area", "poly": hull(pts), "date": time.strftime("%Y-%m-%d %H:%M")}
     save_zones(z)
     print(f"Saved zone '{name}' ({'no-go' if nogo else 'area'}, {len(z[name]['poly'])} corners) in "

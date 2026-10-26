@@ -333,9 +333,22 @@ class Track:
         # A visitor must have WALKED (people come in walking) or, standing, SWAY like a person (a few cm;
         # chair and table legs, which look exactly like human legs at knee height, do not move at all:
         # 26 Oct, a stale room turned furniture into 12 "visitors" in 12 s)
-        sway = float(np.std(np.array(self.recent), 0).max()) if len(self.recent) >= 20 else 0.0
-        if self.id is None and self.hits >= 3 and (self.moved > 0.3 or (self.score >= 0.6 and sway > 0.025)):
+        if self.id is None and self.hits >= 3 and self.person_like():
             self.id, Track._next = Track._next, Track._next + 1
+
+    def person_like(self):
+        """People move SMOOTHLY: walking, they get somewhere (net distance ~ path length); standing,
+        they sway a few cm, slowly. A track hopping between furniture fragments jitters fast without
+        going anywhere (26 Oct: 46 m of 'path' within 45 cm in 93 s; the owner at the desk: 2.3 m)."""
+        if len(self.recent) < 10:
+            return False
+        p = np.array(self.recent)
+        path = float(np.hypot(*np.diff(p, axis=0).T).sum())
+        net = float(np.hypot(*(p[-1] - p[0])))
+        per_scan = path / (len(p) - 1)
+        walked = net > 0.5 and net >= 0.4 * path
+        swaying = len(p) >= 20 and 0.012 < float(p.std(0).max()) < 0.12 and per_scan < 0.03 and self.score >= 0.6
+        return walked or swaying
 
     @property
     def dist(self):
