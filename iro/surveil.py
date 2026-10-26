@@ -34,6 +34,7 @@ CELL = 0.10                                         # heat map cell (m)
 SPAN = 6.0                                          # heat map covers +/- 6 m
 PERSIST_S = 4.0                                     # a change must last this long
 MIN_BEAMS = 4                                       # ... and cover this many neighbouring beams
+MIN_WIDTH_M = 0.10                                  # ... and be at least this wide
 VIEW_CHANGED = 0.25                                 # this share of beams changed = the view moved
 ABSORB_S = 60.0                                     # a change that stays this long becomes part of the room
 
@@ -131,7 +132,10 @@ class Changes:
         grown = np.convolve(mask.astype(float), k, "same") > 0
         return np.convolve((~grown).astype(float), k, "same") == 0
 
-    def step(self, a, r, med, mad, self_mask, people_xy, dt):
+    def step(self, a, r, med, mad, self_mask, people_xy, dt, near=None, far=None):
+        """near / far: the room's edge-tolerant envelope (iro.visitors.envelope); default med."""
+        near = med if near is None else near
+        far = med if far is None else far
         n = len(r)
         if len(self.close) != n:
             self.__init__(n)
@@ -139,8 +143,8 @@ class Changes:
         valid = np.isfinite(r) & (r > 0.15) & ~self_mask
         with np.errstate(invalid="ignore"):
             margin = np.maximum(0.15, np.maximum(3 * mad, 0.04 * np.where(np.isfinite(med), med, r)))
-            closer = valid & (~np.isfinite(med) | (r < med - margin))
-            farther = valid & np.isfinite(med) & (r > med + margin)
+            closer = valid & (~np.isfinite(near) | (r < near - margin))
+            farther = valid & np.isfinite(far) & (r > far + margin)
         # a beam that hits a person (or near one) is not a change of the room
         if people_xy:
             x, y = r * np.cos(a), r * np.sin(a)
@@ -167,6 +171,10 @@ class Changes:
                 if len(good) < MIN_BEAMS:
                     continue
                 d, ang = float(np.median(rng[good])), float(np.median(a[good]))
+                # real size: an object left / taken is >= 10 cm wide; a robot nudged a few cm (or a beam
+                # grazing an edge) only makes slivers (26 Oct: ~25 sliver alerts at once)
+                if d * abs(float(a[good[-1]] - a[good[0]])) < MIN_WIDTH_M:
+                    continue
                 x, y = d * math.cos(ang), d * math.sin(ang)
                 hit = next((c for c in self.active if c[0] == kind and math.hypot(c[1] - x, c[2] - y) < self.SAME_M), None)
                 if hit:
@@ -211,11 +219,14 @@ class Surveil:
             self.changes = Changes(len(r))
         # only real people mask changes: a box put down is an unconfirmed, motionless track
         movers = [(tr.s[0], tr.s[1]) for tr in vis.tracks if tr.id or tr.moved > 0.2]
-        ev += self.changes.step(a, r, vis.med, vis.mad, vis.self_mask, movers, dt)
+        ev += self.changes.step(a, r, vis.med, vis.mad, vis.self_mask, movers, dt,
+                                near=getattr(vis, "near", None), far=getattr(vis, "far", None))
         ab = self.changes.absorb & np.isfinite(r) & (r > 0.15)
         if ab.any():
             vis.med = vis.med.copy()
             vis.med[ab] = r[ab]                    # the room as it is now
+            if hasattr(vis, "refresh"):
+                vis.refresh()
         # no-go zones: any tracked person, or any foreground blob, inside
         things = [(tr.s[0], tr.s[1], f"visitor {tr.id}") for tr in people] + \
                  [(o[0], o[1], "something") for o in getattr(vis, "others", [])]

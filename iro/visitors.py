@@ -233,6 +233,16 @@ def leg_score(w, straight, rad):
     return s
 
 
+def envelope(med, k=3):
+    """(near, far): the closest and farthest the learned room is within +/- k beams (+/- 0.3 deg).
+    A beam grazing a furniture edge flips between the near edge and the far wall with the tiniest
+    angular jitter; comparing with its neighbours too stops that being seen as a person or a change
+    (26 Oct: 25 change alerts at once, in closer/farther pairs, all at edges)."""
+    w = np.concatenate([med[-k:], med, med[:k]])     # the scan is a circle
+    win = np.lib.stride_tricks.sliding_window_view(w, 2 * k + 1)
+    return win.min(1), win.max(1)
+
+
 def detect(a, r, med, mad, self_mask, max_r=MAX_R, others=None):
     """Person candidates [(x, y, width_m, n_points, person_score)] in the lidar frame (x forward,
     y left). Legs are paired into people (two legs 10-60 cm apart); a single leg (the other one
@@ -357,6 +367,7 @@ class Visitors:
             raise SystemExit("The room is not learned yet: iro visitors learn")
         d = np.load(BG)
         self.a, self.med, self.mad, self.self_mask = d["a"], d["med"], d["mad"], d["self_mask"]
+        self.refresh()
         c = cfg()
         self.mic_sign = c.get("mic_sign", 1)
         self.mic_offset = c.get("mic_offset_deg", 0.0)
@@ -364,6 +375,10 @@ class Visitors:
         self.tracks = []
         self.events = []
         self.voice = None                          # last speech bearing in the lidar frame
+
+    def refresh(self):
+        """Recompute the edge-tolerant room (call after self.med changes)."""
+        self.near, self.far = envelope(self.med)
 
     def mic_to_lidar(self, deg):
         return (self.mic_sign * deg + self.mic_offset + 180) % 360 - 180
@@ -374,8 +389,9 @@ class Visitors:
             self.mad = np.interp(a, self.a, self.mad)
             self.self_mask = np.interp(a, self.a, self.self_mask.astype(float)) > 0.5
             self.a = a
+            self.refresh()
         self.others = []
-        dets = detect(a, r, self.med, self.mad, self.self_mask, others=self.others)
+        dets = detect(a, r, self.near, self.mad, self.self_mask, others=self.others)
         for tr in self.tracks:
             tr.predict(t)
         # gated greedy nearest-neighbour association (few people: as good as the Hungarian method)
