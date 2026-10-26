@@ -251,6 +251,64 @@ is added; no polishing yet.
 
 ---
 
+## LiDAR: visitors, avoidance, following, mapping, surveillance (researched 26 Oct)
+
+**Where we are.** RPLidar S2 runs (DenseBoost: 3240 beams, 10 Hz, 0.05-30 m, ±3 cm).
+`iro visitors` finds and tracks people at 1.4 ms per scan: per-beam empty-room background,
+leg/torso blobs, Kalman tracks, proxemics, mic-array speaker matching. It assumes the robot
+**stands still**. The mecanum base (PRIZM Pro, old firmware: `MOVE vx vy wz`, `ENC`, `WDT`) has
+never been driven from the Jetson.
+
+**The one big change.** Once the robot moves, "the empty room" must become a **map**, and the
+robot must know where it is on it. Everything below is built on: odometry → map → localisation →
+people and changes found against the map.
+
+### Layers (bottom up; each one works and is tested before the next)
+
+| # | Layer | How (researched choice) | Done when |
+|---|---|---|---|
+| L0 | Base + safety | `base_node`: `/cmd_vel` → `MOVE`, firmware watchdog `WDT 300` (stops if the Jetson dies), wheel encoders (`ENC`) → mecanum odometry → `/odom` + TF; hardware E-stop cuts motor power; udev names `/dev/base_esp32` and a fixed `/dev/so101` | drives in all directions from the keyboard; E-stop and unplugging both stop it |
+| L1 | Clean scans | self-filter: mask the robot's own body and the arm in its lidar-safe pose → `/scan_filtered`; measured lidar mount (height, offset) in the URDF | no robot points in the scan in any arm pose used while driving |
+| L2 | Map | **slam_toolbox** (online async, standard for ROS 2 with a 2D lidar): drive around the booth once by remote, save the map + pose graph; then **localisation mode** on that map. Mecanum wheels slip, so scan matching corrects the encoder odometry (rf2o laser-only odometry as a fallback if the encoders are poor) | the map lines up after a loop; position error < 5 cm after a lap |
+| L3 | People on a moving robot | foreground = scan points NOT explained by the map (static table legs and pillars vanish, the classic leg-detector confusion); cluster → leg pairs → shape classifier (random forest like `leg_tracker`, retrained on our own recordings, auto-labelled by OAK-D person boxes); tracks in the map frame (Kalman + global nearest-neighbour, SORT-style; the existing `Track` class); fuse OAK-D person boxes (front) and the mic direction (who speaks). Upgrade path: DR-SPAAM (deep 2D-lidar person detector, 20 Hz on a Jetson Xavier NX) if accuracy is not enough | 10 Hz on the Jetson; visitors keep their numbers while the robot turns and drives |
+| L4 | Avoidance | **Nav2 collision monitor** as the last filter on every `/cmd_vel` (independent of planners): circle zones (omni base) stop < 0.30 m, slow to 30 % < 0.6 m, approach model 1.5 s time-to-collision; **social costmap layer** from tracked people: never enter 0.45 m (intimate), pass at ≥ 1.2 m; velocity smoother; booth top speed 0.3 m/s | walks into a person or a chair → it slows and stops, every time |
+| L5 | Behaviours | one state machine (`behavior_node`): **face** (turn on the spot toward the engaged / speaking visitor: works even if we never drive), **follow me** (target = the person who said it: owner voice + mic direction ↔ lidar track; keep 1.2 m; re-find by OAK-D appearance after occlusion; spin to search; "stop"), **guide** (Nav2 goal to an exhibit, checking the visitor follows), **patrol** (Nav2 waypoint loop with look-around stops) | each one demoed in a recorded run |
+| L6 | Continuous surveillance | on the map, every scan: (1) **visitors**: counts, entries/exits, dwell time per zone, heat map, busiest minutes → live page + daily report; (2) **change detection**: live scan vs map, changed cells clustered and confirmed over several seconds → "object left behind" / "**artefact moved or missing**" (fits the heritage-protection theme); many changes at once = pose error → relocalise, no alarm; (3) **no-go zones** (artefact table): a person reaching in → ARC asks politely to step back; (4) all recorded (scans, tracks, events) for `iro review` | 30 min unattended test: counts match a person's count, a moved object is reported, no false alarms |
+
+### Progress
+- [x] 26 Oct: leg-shape detection (width, curvature, circle fit) + leg pairing; a visitor must walk in
+      or sway like a person (furniture legs do not); `iro/surveil.py`: visitor statistics + heat map,
+      zones taught by walking (`iro visitors zone add NAME --nogo`), no-go alerts, change alerts
+      (object left / thing gone) with view-changed guard and self-healing background; stale-room
+      warning. Simulated room test: every event once, on time, 2.5 ms per scan.
+- [ ] Live test with a person (re-learn the room, walk in, stand, walk out, teach a no-go zone,
+      put down / take away a box) and tune on that recording
+- [ ] L0 base_node (after the E-stop is wired)
+
+### Order and effort
+L0 → L1 → L3 (stationary first: "face" works without driving) → L2 → L4 → L5 → L6.
+The stationary parts (L1, L3 face, L6 visitor statistics, no-go zones) are useful even if the
+robot never leaves its spot.
+
+### Install (owner runs, needs sudo)
+`sudo apt install ros-humble-slam-toolbox ros-humble-navigation2 ros-humble-nav2-bringup
+ros-humble-nav2-collision-monitor ros-humble-robot-localization` (all available as Humble
+packages; checked 26 Oct). Memory: slam_toolbox + Nav2 ≈ 0.5-0.8 GB; run them without ARC's LLM, or
+with VS Code closed.
+
+### Decisions (owner, 26 Oct)
+1. **ARC drives on the floor** in the competition: all layers are needed.
+2. **Lidar at knee height (30-50 cm)**: leg tracking is the main people detector.
+3. **No hardware E-stop yet**: no driving tests until it is wired to the motor supply.
+4. **Stationary parts first** (L1, L3, L6 statistics, no-go zones, change alerts), then the base.
+
+### Risks
+Mecanum odometry slips (scan matching fixes it); glass and black cloth return poorly (black:
+10 m range); crowds hide people from a 2D scan (OAK-D fills in); children are short (knee-height
+scan); a moving robot near visitors needs the collision monitor ALWAYS on, never bypassed.
+
+---
+
 ## ROS 2 packages (planned)
 
 | Package | Publishes / provides | Subscribes / uses |

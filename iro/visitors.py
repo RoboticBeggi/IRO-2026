@@ -5,6 +5,7 @@
                                   view is blocked; Enter saves the pose that blocks least ("lidar-safe")
     iro visitors learn            learn the empty room (everyone out of the way for 10 s)
     iro visitors mic-cal          align the mic's angles with the lidar's (talk while walking around)
+    iro visitors zone add NAME [--nogo]   teach a floor zone by walking its edge (iro/surveil.py)
     iro visitors --from RUN       replay a recording (no hardware)
 
 How it works (each step is a standard method; see docs in the code):
@@ -205,8 +206,38 @@ def blocked_deg(a, r, self_r=SELF_R):
 
 # ------------------------------------------------------------------ detection and tracking
 
-def detect(a, r, med, mad, self_mask, max_r=MAX_R):
-    """Person candidates [(x, y, width_m, n_points)] in the lidar frame (x forward, y left)."""
+def shape(px, py):
+    """Blob shape features (as in leg detectors, e.g. leg_tracker): width, straightness (0 = a
+    straight line, larger = curved), and the radius of the best-fitting circle (a leg at knee
+    height is a ~5-8 cm arc facing the lidar)."""
+    w = float(np.hypot(px[-1] - px[0], py[-1] - py[0]))
+    pts = np.stack([px - px.mean(), py - py.mean()], 1)
+    ev = np.linalg.eigvalsh(pts.T @ pts / max(len(pts), 1))
+    straight = float(np.sqrt(max(ev[0], 0)) / max(np.sqrt(max(ev[1], 1e-9)), 1e-6))
+    # algebraic circle fit (Kasa): x^2 + y^2 + D x + E y + F = 0
+    A = np.stack([px, py, np.ones_like(px)], 1)
+    try:
+        D, E, F = np.linalg.lstsq(A, -(px ** 2 + py ** 2), rcond=None)[0]
+        rad = float(np.sqrt(max(D * D / 4 + E * E / 4 - F, 0)))
+    except np.linalg.LinAlgError:
+        rad = float("inf")
+    return w, straight, rad
+
+
+def leg_score(w, straight, rad):
+    """0..1: how much a blob looks like a leg (knee height: 6-20 cm wide, curved, radius 3-15 cm)."""
+    s = 1.0
+    s *= 1.0 if 0.05 <= w <= 0.22 else 0.4 if w <= 0.30 else 0.1
+    s *= 1.0 if straight > 0.08 else 0.5         # a flat piece of wall or box side is straight
+    s *= 1.0 if 0.025 <= rad <= 0.18 else 0.5
+    return s
+
+
+def detect(a, r, med, mad, self_mask, max_r=MAX_R, others=None):
+    """Person candidates [(x, y, width_m, n_points, person_score)] in the lidar frame (x forward,
+    y left). Legs are paired into people (two legs 10-60 cm apart); a single leg (the other one
+    hidden) or a body-wide blob still counts, with a lower score. Foreground blobs that do not look
+    like a person go to `others` (a list) for change detection."""
     ok = np.isfinite(r) & (r > 0.15) & (r < max_r) & ~self_mask
     with np.errstate(invalid="ignore"):            # inf - inf where both are "no echo": not foreground
         margin = np.maximum(0.12, np.maximum(3 * mad, 0.03 * r))
@@ -224,21 +255,34 @@ def detect(a, r, med, mad, self_mask, max_r=MAX_R):
         if len(s) < 4:
             continue
         px, py = x[s], y[s]
-        w = float(np.hypot(px[-1] - px[0], py[-1] - py[0]))
-        if 0.05 <= w <= 1.0:
-            blobs.append([float(px.mean()), float(py.mean()), w, len(s)])
-    # first and last blob may be one (the scan wraps at +/-180 deg)
-    merged = []
-    for b in sorted(blobs, key=lambda b: -b[3]):    # two legs (or leg + bag) close together = one person
-        for m in merged:
-            if math.hypot(b[0] - m[0], b[1] - m[1]) < 0.45:
-                n = m[3] + b[3]
-                m[0], m[1] = (m[0] * m[3] + b[0] * b[3]) / n, (m[1] * m[3] + b[1] * b[3]) / n
-                m[2], m[3] = max(m[2], b[2], math.hypot(b[0] - m[0], b[1] - m[1]) + b[2] / 2), n
-                break
+        w, straight, rad = shape(px, py)
+        if 0.04 <= w <= 1.0:
+            blobs.append([float(px.mean()), float(py.mean()), w, len(s), leg_score(w, straight, rad), straight])
+    # pair legs: the two best-matching leg-like blobs 10-60 cm apart are one person
+    legs = sorted((b for b in blobs if b[4] >= 0.5 and b[2] <= 0.30), key=lambda b: -b[4])
+    people, used = [], set()
+    for i, b in enumerate(legs):
+        if id(b) in used:
+            continue
+        mate = min((c for c in legs[i + 1:] if id(c) not in used and 0.10 <= math.hypot(b[0] - c[0], b[1] - c[1]) <= 0.60),
+                   key=lambda c: math.hypot(b[0] - c[0], b[1] - c[1]), default=None)
+        used.add(id(b))
+        if mate is not None:
+            used.add(id(mate))
+            n = b[3] + mate[3]
+            people.append(((b[0] * b[3] + mate[0] * mate[3]) / n, (b[1] * b[3] + mate[1] * mate[3]) / n,
+                           math.hypot(b[0] - mate[0], b[1] - mate[1]) + (b[2] + mate[2]) / 2, n,
+                           min(1.0, (b[4] + mate[4]) / 2 + 0.2)))
         else:
-            merged.append(list(b))
-    return [tuple(m) for m in merged if m[2] <= 1.0]
+            people.append((b[0], b[1], b[2], b[3], 0.5 * b[4]))   # one leg: the other may be hidden
+    for b in blobs:
+        if id(b) in used or b in legs:
+            continue
+        if 0.25 < b[2] <= 0.7 and b[5] > 0.08:     # legs together / long coat: one curved body-wide blob
+            people.append((b[0], b[1], b[2], b[3], 0.4))
+        elif others is not None:
+            others.append((b[0], b[1], b[2], b[3]))
+    return people
 
 
 class Track:
@@ -251,6 +295,8 @@ class Track:
         self.P = np.diag([0.05, 0.05, 1.0, 1.0])
         self.t = self.t0 = self.seen = t
         self.hits, self.misses = 1, 0
+        self.score, self.start, self.moved = 0.5, (x, y), 0.0   # person-likeness, where first seen
+        self.recent = []                            # last ~3 s of measured positions (sway)
         self.state, self.speaking_t, self.engaged_t = "new", 0.0, None
 
     def predict(self, t):
@@ -272,7 +318,13 @@ class Track:
         self.s = self.s + K @ (np.asarray(z) - H @ self.s)
         self.P = (np.eye(4) - K @ H) @ self.P
         self.seen, self.hits, self.misses = t, self.hits + 1, 0
-        if self.id is None and self.hits >= 3:      # confirmed: give it a visitor number
+        self.moved = max(self.moved, math.hypot(self.s[0] - self.start[0], self.s[1] - self.start[1]))
+        self.recent = (self.recent + [tuple(z)])[-30:]
+        # A visitor must have WALKED (people come in walking) or, standing, SWAY like a person (a few cm;
+        # chair and table legs, which look exactly like human legs at knee height, do not move at all:
+        # 26 Oct, a stale room turned furniture into 12 "visitors" in 12 s)
+        sway = float(np.std(np.array(self.recent), 0).max()) if len(self.recent) >= 20 else 0.0
+        if self.id is None and self.hits >= 3 and (self.moved > 0.3 or (self.score >= 0.6 and sway > 0.025)):
             self.id, Track._next = Track._next, Track._next + 1
 
     @property
@@ -322,7 +374,8 @@ class Visitors:
             self.mad = np.interp(a, self.a, self.mad)
             self.self_mask = np.interp(a, self.a, self.self_mask.astype(float)) > 0.5
             self.a = a
-        dets = detect(a, r, self.med, self.mad, self.self_mask)
+        self.others = []
+        dets = detect(a, r, self.med, self.mad, self.self_mask, others=self.others)
         for tr in self.tracks:
             tr.predict(t)
         # gated greedy nearest-neighbour association (few people: as good as the Hungarian method)
@@ -333,12 +386,14 @@ class Visitors:
             gate = 0.5 + 0.5 * self.tracks[i].speed * max(0.1, t - self.tracks[i].seen)
             if dist > gate or i in used_t or j in used_d:
                 continue
+            self.tracks[i].score = 0.8 * self.tracks[i].score + 0.2 * dets[j][4]
             self.tracks[i].update(dets[j][:2], t)
             used_t.add(i)
             used_d.add(j)
         for j, d in enumerate(dets):
             if j not in used_d:
                 self.tracks.append(Track(d[0], d[1], t))
+                self.tracks[-1].score = d[4]
         keep = []
         for tr in self.tracks:
             if t - tr.seen > (1.5 if tr.id else 0.4):
@@ -439,8 +494,10 @@ def radar(a, r, dets, vis, voice=None, size=640, span=4.0, title=""):
 def cmd_watch(src_run=None, seconds=None):
     from iro.record import run
     from iro.stream import feed
+    from iro.surveil import Surveil
     r = run("visitors" + ("-replay" if src_run else ""))
     vis = Visitors()
+    sv = Surveil()
     if src_run:
         lidar = mic = Replay(src_run)
     else:
@@ -452,7 +509,7 @@ def cmd_watch(src_run=None, seconds=None):
             mic = None
     f = feed()
     raw_t, raw_r, mic_log = [], [], []
-    n, t_start, n_ev = None, time.time(), 0
+    n, t_start, n_ev, n_scans = None, time.time(), 0, 0
     print("Watching for visitors (Ctrl+C to stop). Live picture: the live page.")
     try:
         while seconds is None or time.time() - t_start < seconds:
@@ -464,6 +521,14 @@ def cmd_watch(src_run=None, seconds=None):
             if m and not src_run:
                 mic_log.append(m)
             dets = vis.step(t, a, rr, m)
+            for text in sv.step(t, a, rr, vis):
+                vis.event(t, text)
+            if n_scans == 20:                      # 2 s in: does the room still look as learned?
+                fg = float(np.mean(sv.changes.close > 0)) if sv.changes is not None else 0.0
+                if fg > 0.10:
+                    print(f"  (the room looks different from when it was learned: {fg:.0%} of the view changed. "
+                          "If ARC or the furniture moved, re-learn it: iro visitors learn)")
+            n_scans += 1
             if not src_run:
                 raw_t.append(t)
                 raw_r.append(rr.astype(np.float16))
@@ -471,7 +536,8 @@ def cmd_watch(src_run=None, seconds=None):
                 print(f"  {time.strftime('%H:%M:%S', time.localtime(tt))}  {text}")
                 r.note(text)
             n_ev = len(vis.events)
-            img = radar(a, rr, dets, vis, vis.voice, title=f"visitors: {len(vis.visitors())}   {vis.summary()[:60]}")
+            img = sv.draw(radar(a, rr, dets, vis, vis.voice,
+                                title=f"visitors: {len(vis.visitors())}   {vis.summary()[:60]}"))
             f.show(img, "")
             r.video("radar", img)
             for tr in vis.visitors():
@@ -487,6 +553,10 @@ def cmd_watch(src_run=None, seconds=None):
         if raw_t:
             np.savez_compressed(r.dir / "scans.npz", t=np.array(raw_t), a=a, r=np.array(raw_r))
             (r.dir / "mic.json").write_text(json.dumps(mic_log))
+        sv.stats.save(r.dir, len(vis.visitors()))
+        s = sv.stats.summary(len(vis.visitors()))
+        print(f"\n{s['total']} visitors seen, {s['engaged']} engaged with ARC, mean stay {s['mean_stay_s']} s. "
+              f"Statistics and heat map: {r.dir}")
     return 0
 
 
@@ -636,6 +706,9 @@ def main():
         return cmd_arm()
     if a[:1] == ["mic-cal"]:
         return cmd_mic_cal()
+    if a[:1] == ["zone"]:
+        from iro.surveil import cmd_zone
+        return cmd_zone(a[1:])
     if "--from" in a:
         from iro.record import RUNS
         p = a[a.index("--from") + 1]
