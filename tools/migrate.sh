@@ -11,7 +11,12 @@
 set -euo pipefail
 
 SRC="${1:?usage: tools/migrate.sh user@old-jetson-address}"
-RS=(rsync -aH --partial --info=progress2 --human-readable --exclude='__pycache__' -e "ssh -o ServerAliveInterval=15")
+# one SSH connection, reused by every step: the password is asked once (or never, with a key:
+#   ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519  &&  ssh-copy-id user@old-jetson)
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+SSHO=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/iro-migrate-%r@%h" -o ControlPersist=30m -o ServerAliveInterval=15)
+ssh() { command ssh "${SSHO[@]}" "$@"; }
+RS=(rsync -aH --partial --info=progress2 --human-readable --exclude='__pycache__' -e "ssh ${SSHO[*]}")
 
 echo "== Checking the old Jetson ($SRC)"
 ssh -o ConnectTimeout=8 "$SRC" true || {
@@ -28,8 +33,8 @@ if [ "$old_l4t" != "$new_l4t" ]; then
     echo "   they will be copied anyway, then rebuilt if 'iro doctor' complains. Ctrl+C now to stop."; sleep 8
 fi
 if [ "$old_home" != "$HOME" ]; then
-    echo "!! Different home folder ($old_home vs $HOME). The Python environment and crontab contain the old"
-    echo "   path: bootstrap.sh will rebuild the environment. Easiest: same user name (orin_nano) on both."; sleep 8
+    echo "   (note: different home folder, $old_home vs $HOME. That is fine: copying continues; at the end"
+    echo "    you get one command that makes the old path lead here)"
 fi
 need=$(ssh "$SRC" "cd ~ && du -sck iro-2026 iro-runs voice-models voice-samples weights src/qwentts.cpp whisper.cpp llama.cpp llm-models .venvs/iro wiki 2>/dev/null | tail -1 | cut -f1")
 free=$(df -k --output=avail "$HOME" | tail -1)
@@ -47,12 +52,30 @@ for it in "${ITEMS[@]}"; do
     "${RS[@]}" "$SRC:$it" "$HOME/$(dirname "$it")/"
 done
 
+if [ "$old_home" != "$HOME" ]; then
+    # Claude Code files its notes under the project's path with / and _ turned into -
+    old_key=$(echo "$old_home/iro-2026" | tr '/_' '--'); new_key=$(echo "$HOME/iro-2026" | tr '/_' '--')
+    if [ -d "$HOME/.claude/projects/$old_key" ] && [ ! -e "$HOME/.claude/projects/$new_key" ]; then
+        cp -a "$HOME/.claude/projects/$old_key" "$HOME/.claude/projects/$new_key"
+        echo "== Claude's project notes copied to the new home's name ($new_key)"
+    fi
+fi
+
 echo "== Checking the copies"
 cd "$HOME/iro-2026" && git status --short | head -3 && git log --oneline -1
 for f in wiki/*.zim; do
     a=$(stat -c %s "$HOME/$f"); b=$(ssh "$SRC" "stat -c %s ~/$f")
     [ "$a" = "$b" ] && echo "   ok  $f" || echo "   !!  $f size differs: run this script again"
 done
+
+if [ "$old_home" != "$HOME" ] && [ ! -e "$old_home" ]; then
+    cat <<EOF
+
+The copied programs (Python environment, voice and language-model servers) still point to
+$old_home. One command makes that path lead here, and everything works unchanged:
+  sudo ln -s $HOME $old_home
+EOF
+fi
 
 cat <<EOF
 
