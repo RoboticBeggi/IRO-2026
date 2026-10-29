@@ -29,6 +29,7 @@ HEALTH
 ARM (SO-ARM101)
   iro visitors            lidar + mic array: who is there, approaching, engaged, speaking (live radar)
   iro visitors arm|learn|mic-cal   lidar-safe arm pose / learn the empty room / align mic to lidar
+  iro explore --sim       ARC drives around on its own and maps the place (simulator; real robot needs the E-stop)
   iro mic                 the mic array's voice direction, live
   iro voice presets|design|keep|use|say   choose ARC's voice (Qwen3-TTS): built-in or designed from words
   iro arc chat            talk to ARC, the robot's offline language model (BM / EN / DE)
@@ -101,6 +102,7 @@ case "$cmd" in
     help|-h|--help) usage ;;
 
     visitors) ros_env; exec python -m iro.visitors "$@" ;;
+    explore) exec python -m iro.explore "$@" ;;
     mic) exec python -m iro.mic "$@" ;;
     voice) exec python -m iro.voice "$@" ;;
     arc) exec python -m iro.arc "$@" ;;
