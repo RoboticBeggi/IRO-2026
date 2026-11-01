@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Throttle test: run ARC's model flat out for ~1 min and count the Jetson's power-limit events.
-# Compare power modes:  sudo nvpmodel -m 1 (25W)  /  sudo nvpmodel -m 2 (MAXN_SUPER), then run this.
+# Compare power modes (Orin NX numbers): sudo nvpmodel -m 3 (25W) / -m 4 (40W) / -m 0 (MAXN_SUPER), then run this.
+# (Orin Nano numbers were: -m 1 = 25W, -m 2 = MAXN_SUPER.)
 # oc3 = VDD_IN instantaneous power (NVIDIA forum): each event throttles the clocks for a moment.
 set -euo pipefail
 S=/sys/class/hwmon/hwmon3

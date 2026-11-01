@@ -76,7 +76,7 @@ limits:
     ram_free_fail_mb: 400
     disk_free_warn_gb: 20
     disk_free_fail_gb: 5
-    power_mode: 25W             # 23 Oct: MAXN_SUPER throttled 13x per 38 s of LLM load (oc3 power spikes), 25W 1x for -5% speed (tools/power_test.sh)
+    power_mode: 40W             # 1 Nov, Orin NX: 25W caps the GPU at 408 MHz (voice RTF 2.0-2.7 = long pauses); 40W allows 1173 MHz. On the Nano 25W was the pick (MAXN_SUPER throttled 13x per 38 s, tools/power_test.sh); re-run that test on the NX
   servos:                       # STS3215, 12 V version
     volt_warn: 11.0
     volt_fail: 10.0

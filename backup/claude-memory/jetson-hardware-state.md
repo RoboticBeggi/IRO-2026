@@ -1,6 +1,6 @@
 ---
 name: jetson-hardware-state
-description: "Devices, software env, setup quirks and decisions on the Orin Nano robot (as of 2026-10-20)"
+description: "Robot now on Orin NX 16GB (migrated ~29 Oct); devices, env, quirks and decisions (Nano-era history below)"
 metadata:
   node_type: memory
   type: project
@@ -8,7 +8,9 @@ metadata:
   modified: 2026-10-21T07:57:18.804Z
 ---
 
-Jetson Orin Nano: JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname `ubuntu`, MAXN_SUPER.
+**MIGRATED to Jetson Orin NX 16GB (~29 Oct 2026, via tools/migrate.sh).** User now orin_nx (home /home/orin_nx; /home/orin_nano is a symlink to it, so old absolute paths still work), hostname still `ubuntu` (backup branch stays autosave/ubuntu), JetPack R36.5, 15.6 GB RAM (the 7.6 GB limits below are Nano-era), power modes 0 MAXN_SUPER / 1 10W / 2 15W / 3 25W / 4 40W (running 40W). State on 1 Nov: torch CUDA OK, llama/whisper/qwentts binaries present, all models/wiki copied; NOT yet done: tools/bootstrap.sh (ROS 2, udev 99-iro-usb + OAK, crontab backup/feed), ros2_ws rebuild, hardware re-plug + doctor. POWER MODE on the NX: 25W caps the GPU at 408 MHz (talk_bench voice RTF 2.0-2.7, pauses 10-23 s); 40W allows 1173 MHz. Never recommend 25W on the NX (that was the Nano pick); robot.yaml power_mode set to 40W on 1 Nov, tools/power_test.sh still to be re-run on the NX for throttle events.
+
+Jetson Orin Nano (old board, history): JetPack R36.5, Ubuntu 22.04, 7.4 GiB RAM, CUDA 12.6, hostname `ubuntu`, MAXN_SUPER.
 - Devices (all in repo config/robot.yaml): SO-101 follower on /dev/so101 (12 V STS3215, fw 3.10, IDs 1-6 from old project); RPLidar **S2 at 1,000,000 baud** on /dev/rplidar (latched health error code 4 cleared by reset 0xA5 0x40); openaicam wrist cam /dev/video0; OAK-D (needs udev 03e7); reSpeaker XVF3800 fw 2.0.6; PRIZM not yet connected (as of 2026-10-20).
 - Python env ~/.venvs/iro (uv): Jetson torch 2.10 + nvidia-cudss-cu12 (LD_LIBRARY_PATH in env.sh), LeRobot 0.4.4, depthai 3.11. **numpy pinned <2 and opencv-headless <4.11** so ROS 2 Humble message libs load; accepted conflict with rerun-sdk.
 - arduino-cli + avrdude 8.0 in ~/.local/opt and ~/.arduino15 (no sudo).
