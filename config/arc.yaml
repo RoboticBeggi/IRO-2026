@@ -1,0 +1,34 @@
+# ARC's language model (iro arc). Models live outside the repo (too big for git): model_dir.
+model: qwen35-2b            # 23 Oct: SEA-LION E2B needs 3.2 GB; Qwen3.5-2B 1.25 GB so hearing + voice fit (tools/mem_budget.sh); best facts 13/13
+topic: heritage
+model_dir: ~/llm-models
+wiki: true                  # look things up in offline Wikipedia (~/wiki/*.zim, iro/wiki.py)
+embedder:
+  enabled: false            # 23 Oct: its 0.78 GB did not fit with Whisper + the Qwen voice; BM25 ranks paragraphs instead
+  file: embeddinggemma-300M-Q8_0.gguf
+  url: https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf
+server:
+  binary: ~/llama.cpp/build/bin/llama-server
+  port: 8090
+  ctx: 6144                 # 2 slots x 3072; 8192 + Whisper q8 + voice + VS Code ran the Jetson out of memory (24 Oct)
+models:
+  qwen35-08b:
+    file: Qwen3.5-0.8B-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf
+    note: Alibaba Qwen3.5 0.8B, ARC Lite candidate (facts come from cards/Wikipedia, the model only chats)
+  sealion-e2b:
+    file: Gemma-SEA-LION-v4.5-E2B-IT-Q4_K_M.gguf
+    url: https://huggingface.co/aisingapore/Gemma-SEA-LION-v4.5-E2B-IT-GGUF/resolve/main/Gemma-SEA-LION-v4.5-E2B-IT-Q4_K_M.gguf
+    note: Gemma 4 E2B tuned by AI Singapore for SEA languages incl. Malay (May 2026)
+  gemma4-e2b:
+    file: gemma-4-E2B-it-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf
+    note: Google Gemma 4 E2B, the base of the one above (shows what the SEA tuning adds)
+  qwen35-4b:
+    file: Qwen3.5-4B-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf
+    note: Alibaba Qwen3.5 4B (Mar 2026), strongest reasoning at this size
+  qwen35-2b:
+    file: Qwen3.5-2B-Q4_K_M.gguf
+    url: https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf
+    note: Alibaba Qwen3.5 2B, the fast fallback

@@ -1,0 +1,21 @@
+# Stable device names for the IRO robot, so ports never swap between boots.
+# Installed by tools/bootstrap.sh to /etc/udev/rules.d/
+# Matched by serial number; if a board is replaced, update the serial
+# (udevadm info -a /dev/ttyACM0 | grep serial).
+
+# SO-ARM101 follower: Feetech bus servo board (CH343)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", ATTRS{serial}=="5B91044420", SYMLINK+="so101", MODE="0666"
+
+# RPLidar S2 (CP2102N)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", ATTRS{serial}=="14ec6ba74d73ed118dbf62eefdf7b791", SYMLINK+="rplidar", MODE="0666"
+
+# OAK-D depth camera (Luxonis): needed by depthai and the ROS driver without root
+SUBSYSTEM=="usb", ATTRS{idVendor}=="03e7", MODE="0666"
+
+# reSpeaker XVF3800 mic array: USB control access (direction of arrival, settings)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="001a", MODE="0666"
+
+# ESP32-S3 base motor controller (old PUSAKA firmware)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="58:8C:81:EA:A3:34", SYMLINK+="base_esp32", MODE="0666"
+
+# TETRIX PRIZM: add a SYMLINK+="prizm" line here once `iro prizm find` has identified it

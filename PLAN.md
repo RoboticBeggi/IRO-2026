@@ -94,6 +94,42 @@ all three languages.
 **Watch:** Malay is the go/no-go check for model choice. This is the most
 important result of week 1.
 
+**Status (24 Oct):** built as ARC (`iro arc talk`). Chosen: Whisper
+large-v3-turbo (STT), Qwen3.5-2B (LLM), Qwen3-TTS "Jarvis" voice designed
+with Voice Design and cloned (qwentts.cpp). English first. First test: answers
+started 10–24 s after the visitor stopped, with pauses between sentences.
+
+#### Voice upgrades (ranked; from the 24 Oct review of the recorded test)
+
+Speed:
+- [ ] 1. Whisper fixed to English (auto-detect: 1.6 s and turned English into Malay; fixed: 0.85 s, correct)
+- [ ] 2. One continuous audio stream for the whole conversation (no gap per sentence)
+- [ ] 3. Generate the next part while the current one plays (voice is 0.79x real time)
+- [ ] 4. Start speaking at the first clause, not the first full sentence
+- [ ] 5. Instant pre-recorded acknowledgements ("Hmm, let me think.") while looking things up
+- [ ] 6. Cache of common lines (greetings, goodbyes, skill lines) pre-recorded at start-up
+- [ ] 7. No Wikipedia lookup for small talk (greetings, thanks, goodbyes)
+- [ ] 8. Warm the Wikipedia index at start-up (cold disk: 1.8 s per first lookup)
+- [ ] 9. Warm all three models at start-up (first reply was slowest)
+- [ ] 10. Voice gets the GPU first: listening paused while speaking, writing finishes fast
+- [ ] 11. Shorter spoken replies (about 2 sentences, punchy first line)
+
+Naturalness:
+- [ ] 12. Rest of the reply synthesised as one paragraph (consistent intonation, ParaTTS)
+- [ ] 13. Speakable text: years, numbers, abbreviations, symbols, brackets
+- [ ] 14. Write for the ear: contractions, openers, varied sentence length, punctuation for pauses
+- [ ] 15. Even natural pauses: trim chunk silences, ~250 ms breath between parts
+- [ ] 16. Expressiveness tuned per mood (calmer calm, livelier amused/excited)
+- [ ] 17. More moods (warm, curious, proud) keeping the same voice (>= 0.85)
+- [ ] 18. Even loudness across moods
+
+Listening:
+- [ ] 19. Owner recognition: threshold 0.75 + keeps learning from confirmed owner turns (missed at 0.81)
+- [ ] 20. Smarter end of turn: wait a little longer when the sentence ends on "and", "the", a comma
+- [ ] 21. Barge-in: the visitor can interrupt ARC (needs 22)
+- [ ] 22. Hardware: speaker on the reSpeaker 3.5 mm jack, so the array's echo cancelling hears ARC
+- [ ] 23. LED ring shows listening / thinking / speaking
+
 ### 3. Turn to speaker (ReSpeaker XVF3800)
 
 The XVF3800 does DoA, beamforming, noise suppression and echo cancellation on
@@ -212,6 +248,64 @@ is added; no polishing yet.
 | YOLO-World | Check it runs at a usable FPS on the Orin Nano; no integration yet |
 | SCD30 | Read values once over I2C |
 | Sub-topic switcher | Write 5 practice sub-topics and a system prompt for each |
+
+---
+
+## LiDAR: visitors, avoidance, following, mapping, surveillance (researched 26 Oct)
+
+**Where we are.** RPLidar S2 runs (DenseBoost: 3240 beams, 10 Hz, 0.05-30 m, ±3 cm).
+`iro visitors` finds and tracks people at 1.4 ms per scan: per-beam empty-room background,
+leg/torso blobs, Kalman tracks, proxemics, mic-array speaker matching. It assumes the robot
+**stands still**. The mecanum base (PRIZM Pro, old firmware: `MOVE vx vy wz`, `ENC`, `WDT`) has
+never been driven from the Jetson.
+
+**The one big change.** Once the robot moves, "the empty room" must become a **map**, and the
+robot must know where it is on it. Everything below is built on: odometry → map → localisation →
+people and changes found against the map.
+
+### Layers (bottom up; each one works and is tested before the next)
+
+| # | Layer | How (researched choice) | Done when |
+|---|---|---|---|
+| L0 | Base + safety | `base_node`: `/cmd_vel` → `MOVE`, firmware watchdog `WDT 300` (stops if the Jetson dies), wheel encoders (`ENC`) → mecanum odometry → `/odom` + TF; hardware E-stop cuts motor power; udev names `/dev/base_esp32` and a fixed `/dev/so101` | drives in all directions from the keyboard; E-stop and unplugging both stop it |
+| L1 | Clean scans | self-filter: mask the robot's own body and the arm in its lidar-safe pose → `/scan_filtered`; measured lidar mount (height, offset) in the URDF | no robot points in the scan in any arm pose used while driving |
+| L2 | Map | **slam_toolbox** (online async, standard for ROS 2 with a 2D lidar): drive around the booth once by remote, save the map + pose graph; then **localisation mode** on that map. Mecanum wheels slip, so scan matching corrects the encoder odometry (rf2o laser-only odometry as a fallback if the encoders are poor) | the map lines up after a loop; position error < 5 cm after a lap |
+| L3 | People on a moving robot | foreground = scan points NOT explained by the map (static table legs and pillars vanish, the classic leg-detector confusion); cluster → leg pairs → shape classifier (random forest like `leg_tracker`, retrained on our own recordings, auto-labelled by OAK-D person boxes); tracks in the map frame (Kalman + global nearest-neighbour, SORT-style; the existing `Track` class); fuse OAK-D person boxes (front) and the mic direction (who speaks). Upgrade path: DR-SPAAM (deep 2D-lidar person detector, 20 Hz on a Jetson Xavier NX) if accuracy is not enough | 10 Hz on the Jetson; visitors keep their numbers while the robot turns and drives |
+| L4 | Avoidance | **Nav2 collision monitor** as the last filter on every `/cmd_vel` (independent of planners): circle zones (omni base) stop < 0.30 m, slow to 30 % < 0.6 m, approach model 1.5 s time-to-collision; **social costmap layer** from tracked people: never enter 0.45 m (intimate), pass at ≥ 1.2 m; velocity smoother; booth top speed 0.3 m/s | walks into a person or a chair → it slows and stops, every time |
+| L5 | Behaviours | one state machine (`behavior_node`): **face** (turn on the spot toward the engaged / speaking visitor: works even if we never drive), **follow me** (target = the person who said it: owner voice + mic direction ↔ lidar track; keep 1.2 m; re-find by OAK-D appearance after occlusion; spin to search; "stop"), **guide** (Nav2 goal to an exhibit, checking the visitor follows), **patrol** (Nav2 waypoint loop with look-around stops) | each one demoed in a recorded run |
+| L6 | Continuous surveillance | on the map, every scan: (1) **visitors**: counts, entries/exits, dwell time per zone, heat map, busiest minutes → live page + daily report; (2) **change detection**: live scan vs map, changed cells clustered and confirmed over several seconds → "object left behind" / "**artefact moved or missing**" (fits the heritage-protection theme); many changes at once = pose error → relocalise, no alarm; (3) **no-go zones** (artefact table): a person reaching in → ARC asks politely to step back; (4) all recorded (scans, tracks, events) for `iro review` | 30 min unattended test: counts match a person's count, a moved object is reported, no false alarms |
+
+### Progress
+- [x] 26 Oct: leg-shape detection (width, curvature, circle fit) + leg pairing; a visitor must walk in
+      or sway like a person (furniture legs do not); `iro/surveil.py`: visitor statistics + heat map,
+      zones taught by walking (`iro visitors zone add NAME --nogo`), no-go alerts, change alerts
+      (object left / thing gone) with view-changed guard and self-healing background; stale-room
+      warning. Simulated room test: every event once, on time, 2.5 ms per scan.
+- [ ] Live test with a person (re-learn the room, walk in, stand, walk out, teach a no-go zone,
+      put down / take away a box) and tune on that recording
+- [ ] L0 base_node (after the E-stop is wired)
+
+### Order and effort
+L0 → L1 → L3 (stationary first: "face" works without driving) → L2 → L4 → L5 → L6.
+The stationary parts (L1, L3 face, L6 visitor statistics, no-go zones) are useful even if the
+robot never leaves its spot.
+
+### Install (owner runs, needs sudo)
+`sudo apt install ros-humble-slam-toolbox ros-humble-navigation2 ros-humble-nav2-bringup
+ros-humble-nav2-collision-monitor ros-humble-robot-localization` (all available as Humble
+packages; checked 26 Oct). Memory: slam_toolbox + Nav2 ≈ 0.5-0.8 GB; run them without ARC's LLM, or
+with VS Code closed.
+
+### Decisions (owner, 26 Oct)
+1. **ARC drives on the floor** in the competition: all layers are needed.
+2. **Lidar at knee height (30-50 cm)**: leg tracking is the main people detector.
+3. **No hardware E-stop yet**: no driving tests until it is wired to the motor supply.
+4. **Stationary parts first** (L1, L3, L6 statistics, no-go zones, change alerts), then the base.
+
+### Risks
+Mecanum odometry slips (scan matching fixes it); glass and black cloth return poorly (black:
+10 m range); crowds hide people from a 2D scan (OAK-D fills in); children are short (knee-height
+scan); a moving robot near visitors needs the collision monitor ALWAYS on, never bypassed.
 
 ---
 

@@ -1,0 +1,22 @@
+# Installed from PyPI after requirements-torch.txt.
+# Exact versions of everything are in requirements-lock.txt (written by tools/backup.sh).
+lerobot[feetech]==0.4.4
+# libcudss.so.0 for the Jetson torch build; env.sh puts it on LD_LIBRARY_PATH
+nvidia-cudss-cu12==0.8.0.10
+# OAK-D depth camera (doctor, hardware snapshot)
+depthai==3.11.0
+# numpy and OpenCV versions are forced in overrides.txt (needed by ROS 2).
+# ESP32-S3 base controller: flash backup / restore
+esptool==5.6.0
+# YOLO (Ultralytics, installed from requirements-nodeps.txt): its other dependencies
+matplotlib>=3.3
+pillow>=7.1.2
+psutil>=5.8
+polars>=0.20
+ultralytics-thop>=2.2.3
+nvidia-ml-py>=12.0
+requests>=2.23
+# Offline Wikipedia for ARC (Kiwix ZIM files: full-text search + articles)
+libzim==3.13.1
+# reSpeaker XVF3800 control (direction of arrival, LED ring): iro/mic.py
+pyusb==1.3.1
