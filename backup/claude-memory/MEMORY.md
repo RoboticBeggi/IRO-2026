@@ -1,0 +1,5 @@
+- [Jetson hardware state](jetson-hardware-state.md) — now Orin NX 16GB (migrated ~29 Oct); devices, venv, cuDSS quirk, SO-101 state
+- [Backup failsafe](backup-failsafe.md) — SSD died before; keep all state recoverable via repo + tools/backup.sh
+- [Record and review](record-and-review.md) — every camera/hardware run is recorded (~/iro-runs, iro review); review recordings before guessing
+- [ARC LLM](arc-llm.md) — offline LLM 'ARC': models, offline Wikipedia, skills/grammar design, open items
+- [ARC straightforward](arc-straightforward.md) — owner wants short direct answers, no yapping, in every mood

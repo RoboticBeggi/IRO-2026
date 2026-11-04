@@ -1,0 +1,16 @@
+date: 2026-10-22 15:45
+grasp_h_m: 0.012
+grasp_pixel:
+- 446.5
+- 327.5
+jaw_axis_deg: -165.7
+look_h_m: 0.15
+look_offset_gripper_m:
+- -0.0032
+- -0.12
+mm_per_px: 0.2887
+note: grasp pixel = outline centre, recomputed from the teach recording (22 Oct 15:52)
+recording: /home/orin_nano/iro-runs/20261022-154407_pick-teach-Tape
+roll_sign: -1
+taught_width_mm: 24.0
+top_peak: 0.443

@@ -1,0 +1,22 @@
+# Source this in every terminal:  source ~/iro-2026/env.sh
+# Activates the Python environment and keeps LeRobot calibration inside the
+# repo (arm/calibration/), so it is backed up with everything else.
+
+IRO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export IRO_ROOT
+export PATH="$HOME/.local/bin:$PATH"
+export HF_LEROBOT_CALIBRATION="$IRO_ROOT/arm/calibration"
+# The iro package (doctor, hardware helpers) for scripts and ROS nodes
+case ":${PYTHONPATH:-}:" in *":$IRO_ROOT:"*) ;; *) export PYTHONPATH="$IRO_ROOT${PYTHONPATH:+:$PYTHONPATH}" ;; esac
+
+# Stable port names from tools/99-iro-usb.rules; fall back to the raw device.
+if [ -e /dev/so101 ]; then export SO101_PORT=/dev/so101; else export SO101_PORT=/dev/ttyACM0; fi
+export SO101_ID=iro_follower
+
+if [ -f "$HOME/.venvs/iro/bin/activate" ]; then
+    . "$HOME/.venvs/iro/bin/activate"
+    # The Jetson torch build needs libcudss.so.0, which comes from pip, not JetPack
+    export LD_LIBRARY_PATH="$HOME/.venvs/iro/lib/python3.10/site-packages/nvidia/cu12/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+    echo "env.sh: ~/.venvs/iro missing, run tools/bootstrap.sh" >&2
+fi

@@ -1,0 +1,3 @@
+@reboot sleep 20 && /home/orin_nx/iro-2026/tools/iro feed >> /home/orin_nx/.iro-feed.log 2>&1
+*/10 * * * * /home/orin_nx/iro-2026/tools/backup.sh >> /home/orin_nx/.iro-backup.log 2>&1
+@reboot sleep 120 && /home/orin_nx/iro-2026/tools/backup.sh >> /home/orin_nx/.iro-backup.log 2>&1

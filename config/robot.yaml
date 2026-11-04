@@ -1,0 +1,93 @@
+# One place for every device and every safety limit on the robot.
+# Used by `iro doctor`, the ROS 2 nodes and the tools. Change values here, not in code.
+
+devices:
+  arm:
+    port: /dev/so101            # udev symlink, see tools/99-iro-usb.rules
+    usb: "1a86:55d3"
+    servo_ids: {shoulder_pan: 1, shoulder_lift: 2, elbow_flex: 3, wrist_flex: 4, wrist_roll: 5, gripper: 6}
+    # Joints allowed a full 0-4095 calibration range (they turn all the way round)
+    continuous_joints: [wrist_roll]
+    # +1 or -1 per joint so RViz turns the same way as the real arm.
+    # Check with `iro mirror`: move each joint by hand, flip the sign if RViz goes the other way.
+    # Zero error of each joint vs the URDF (degrees), measured by `iro arm zero` (table touches).
+    joint_offsets_deg: {shoulder_pan: 0.0, shoulder_lift: -5.47, elbow_flex: 13.98, wrist_flex: -2.88, wrist_roll: -90.0, gripper: 0.0}
+    joint_signs: {shoulder_pan: 1, shoulder_lift: 1, elbow_flex: 1, wrist_flex: 1, wrist_roll: 1, gripper: 1}
+  lidar:
+    port: /dev/rplidar
+    usb: "10c4:ea60"
+    baud: 1000000               # RPLidar S2 (model byte 0x71)
+  arm_camera:
+    device: /dev/video0         # "openaicam" global-shutter camera
+    usb: "32e6:9251"
+  depth_camera:
+    usb: ["03e7:2485", "03e7:f63b"]   # OAK-D Pro W: unbooted / booted
+    # Mounted on the body (measured 21 Oct): lens 11.5 cm above the floor, looking down at the
+    # floor 23 cm ahead (slant 25.7 cm) => pitched 26.6 deg down
+    height_m: 0.115
+    pitch_down_deg: 26.6
+  mic_array:
+    usb: "2886:001a"            # reSpeaker XVF3800
+    alsa_name: "XVF3800"
+  base_controller:
+    # TETRIX PRIZM Pro = ESP32-S3, running the old PUSAKA motor firmware (backup/esp32s3/).
+    # Waits for the green START button after every reset before it answers.
+    usb: "303a:1001"
+    port: /dev/base_esp32
+
+# Where each sensor sits relative to the arm base (base_link), metres and radians.
+# PLACEHOLDERS: measure on the real robot once the body is built.
+mounts:
+  lidar: {xyz: [0.0, 0.0, 0.10], rpy: [0, 0, 0]}
+  depth_camera: {xyz: [0.10, 0.0, 0.05], rpy: [0, 0, 0]}
+
+# Autonomous pick-up with the wrist camera + YOLO (`iro pick`). Metres, in base_link
+# (origin = bottom of the arm's base; z up).
+pick:
+  mount_height: 0.13          # table is ~13 cm below the arm base (table touches, 20 Oct)
+  table_z: -0.13              # default; `iro arm zero` / `iro pick teach` measure it (pick_taught.yaml)
+  clearance: 0.01             # the tip never goes lower than table_z + clearance
+  max_joint_speed: 0.8        # rad/s
+  # Look pose: tip above look_xy, look_height above the TABLE, gripper leaning look_tilt_deg
+  # outward (0 = straight down; the SO-101 can point straight down up to ~8 cm above its base).
+  # The table is ~13 cm below the arm base, so 15 cm above the table is still straight-down.
+  look_xy: [0.20, 0.0]
+  look_height: 0.15
+  look_tilt_deg: 0
+  grasp_height: 0.025         # tip height above the table when closing (`iro pick teach` sets grasp_z exactly)
+  lift_height: 0.10           # lift objects this far above the table
+  gripper_open_pct: 70        # % of the calibrated gripper range
+  gripper_closed_pct: 0
+  gripper_max_open_m: 0.07    # fallback only: `iro measure gripper` writes the real one (71 mm, 21 Oct)
+  model: yolo11n.pt           # in models/
+  classes: [bottle, cup, cell phone, remote, scissors, banana, apple, orange, mouse, sports ball]
+  min_conf: 0.4
+  # Pixel where an object sits when it is straight under the gripper at look height.
+  # Set by `iro pick teach`; null = image centre.
+  grasp_pixel: null
+  servo_tolerance_px: 8
+
+limits:
+  jetson:
+    temp_warn_c: 80
+    temp_fail_c: 92
+    vdd_in_min_mv: 4750         # module input rail, nominal 5.0 V
+    ram_free_warn_mb: 1000
+    ram_free_fail_mb: 400
+    disk_free_warn_gb: 20
+    disk_free_fail_gb: 5
+    power_mode: 40W             # 1 Nov, Orin NX: 25W caps the GPU at 408 MHz (voice RTF 2.0-2.7 = long pauses); 40W allows 1173 MHz. On the Nano 25W was the pick (MAXN_SUPER throttled 13x per 38 s, tools/power_test.sh); re-run that test on the NX
+  servos:                       # STS3215, 12 V version
+    volt_warn: 11.0
+    volt_fail: 10.0
+    volt_max: 13.0
+    temp_warn_c: 55
+    temp_fail_c: 65             # servo shuts itself down at 70
+    load_warn_pct: 80
+  backup:
+    snapshot_max_age_min: 30
+    push_max_age_h: 24
+
+backup:
+  usb_label: IRO_BACKUP         # USB drive name for offline backups
+  interval_min: 10
