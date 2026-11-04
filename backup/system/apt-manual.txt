@@ -462,6 +462,7 @@ parted
 passwd
 pciutils
 perl-base
+picocom
 ppp
 procps
 proj-data
@@ -505,6 +506,7 @@ rsyslog
 seatd
 sed
 sensible-utils
+smartmontools
 software-properties-common
 sox
 sshfs
@@ -518,6 +520,7 @@ tar
 tensorrt
 tensorrt-libs
 timgm6mb-soundfont
+tmux
 tpm2-tools
 tzdata
 ubuntu-desktop
