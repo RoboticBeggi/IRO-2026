@@ -24,7 +24,7 @@ HEALTH
   iro doctor              full checkup with diagnosis and fixes
   iro doctor quick        faster checkup (skips GPU and SSD log)
   iro doctor watch        live watch of power, heat and servos (Ctrl+C stops)
-  iro doctor arm          only one group: jetson | devices | arm | backup
+  iro doctor quick arm    only some groups (after full/quick/watch): jetson | devices | arm | backup
 
 ARM (SO-ARM101)
   iro visitors            lidar + mic array: who is there, approaching, engaged, speaking (live radar)
@@ -58,7 +58,10 @@ EFAD (Embedded Foundational Augmented Detection) - live view: http://localhost:8
   iro review [RUN|list]   look back at a recorded run (every camera program records itself)
   iro object show NAME    INSTANT: show an object ~15 s and name it; recognised at once
   iro pick teach NAME     once: slide NAME between the lowered jaws; it learns the grasp from above
-  iro pick NAME           pick NAME up from the floor with the wrist camera (--drop puts it back)
+  iro pick NAME           pick NAME up from the floor: the OAK-D finds it, the wrist camera fine-centres
+                          (--drop puts it back; --to=X,Y carries it to that spot, cm from the arm base)
+  iro pick scout          what the OAK-D sees on the floor now: positions and sizes
+  iro pick calibrate NAME once: how the wrist picture moves with the gripper (20 s, NAME lying still)
   iro measure [NAME]      L x W x H of objects on the floor (OAK-D); NAME saves it (--looks N)
   iro measure gripper     real jaw opening at every gripper % (OAK-D); max opening
   iro measure feel [NAME] width of what the gripper holds, from where the jaws stop
