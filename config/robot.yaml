@@ -13,6 +13,10 @@ devices:
     # Zero error of each joint vs the URDF (degrees), measured by `iro arm zero` (table touches).
     joint_offsets_deg: {shoulder_pan: 0.0, shoulder_lift: -5.47, elbow_flex: 13.98, wrist_flex: -2.88, wrist_roll: -90.0, gripper: 0.0}
     joint_signs: {shoulder_pan: 1, shoulder_lift: 1, elbow_flex: 1, wrist_flex: 1, wrist_roll: 1, gripper: 1}
+    # Servo stiffness (P) set by iro.motion on every connect (servo RAM; LeRobot's default is 16).
+    # 15 Nov test: P 24 cut the gravity shortfall 38 -> 24 counts (shoulder) and 24 -> 15 (elbow)
+    # with no shaking; P 32 made wrist_flex shake. Leave the wrist joints at 16.
+    p_gain: {shoulder_lift: 24, elbow_flex: 24}
   lidar:
     port: /dev/rplidar
     usb: "10c4:ea60"
@@ -47,7 +51,7 @@ pick:
   mount_height: 0.13          # table is ~13 cm below the arm base (table touches, 20 Oct)
   table_z: -0.13              # default; `iro arm zero` / `iro pick teach` measure it (pick_taught.yaml)
   clearance: 0.01             # the tip never goes lower than table_z + clearance
-  max_joint_speed: 0.8        # rad/s
+  max_joint_speed: 1.5        # rad/s; 15 Nov test: 1.6 just as accurate (<= 2.3 mm) and no hotter than 0.8, moves 1.13 -> 0.68 s
   # Look pose: tip above look_xy, look_height above the TABLE, gripper leaning look_tilt_deg
   # outward (0 = straight down; the SO-101 can point straight down up to ~8 cm above its base).
   # The table is ~13 cm below the arm base, so 15 cm above the table is still straight-down.

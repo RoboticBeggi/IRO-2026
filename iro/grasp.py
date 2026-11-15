@@ -473,42 +473,45 @@ def tallest_m(name, default=0.08):
     return max(sizes) if sizes else default
 
 
-FAST_STEP, FAST_S = 0.03, 0.35          # above the object: 3 cm steps, no settling pause
-CAREFUL_STEP, NEAR_STEP = 0.015, 0.01   # near it: 1.5 cm steps, the last 3 cm in 1 cm steps
-LAND_S = 0.8                            # the very last step slowly: soft landing
+FAST_V = 0.15        # m/s top tip speed above the object (free air)
+CAREFUL_V = 0.04     # m/s top speed near it; minimum-jerk slows to 0 at the end: soft landing
 
 
 def descend(arm, xy, roll, h_to, r, top_m=0.08, block_mm=8, tilt=0.0):
-    """Down to h_to at two speeds. FAST while the jaws are higher than the object could possibly be
-    (top_m + 2 cm: nothing to touch there). CAREFUL below that: every step settles and feels for a
-    blockage: if the tip stays more than block_mm above where it was sent, a jaw has landed on
-    something (22 Oct: a standing tape was knocked over). The last step is slow (soft landing).
-    15 Nov: was 1 cm steps all the way (22.5 s from 15 cm). Returns True when it reached h_to;
-    False = blocked (it backs up 3 cm)."""
+    """Down to h_to as two SMOOTH straight-line moves (arm.move_line), no stops on the way.
+    FAST while the jaws are higher than the object could possibly be (top_m + 2 cm: nothing to touch);
+    CAREFUL below that, watched ~50x a second: if the tip falls behind its command by more than
+    block_mm beyond its normal lag (measured over the first part, still above the object), a jaw has
+    landed on something (22 Oct: a standing tape was knocked over): it stops and backs up 3 cm.
+    15 Nov: 1 cm steps took 22.5 s, stepped at 2 speeds 13 s. Returns True when it reached h_to."""
     from iro.pick import pick_config
     table = pick_config()["table_z"]
     careful_from = h_to + top_m + 0.02
-    hs, h = [], arm.tip()[2] - table
-    while h - h_to > 1e-4:
-        if h > careful_from + 1e-4:
-            h = max(h - FAST_STEP, careful_from)
-        else:
-            h = h - (CAREFUL_STEP if h - h_to > 0.03 + 1e-4 else NEAR_STEP)
-            h = h_to if h - h_to < 0.005 else h        # no tiny last step: land directly
-        hs.append(h)
     t0 = time.time()
-    for h in hs:
-        careful = h <= careful_from + 1e-4
-        duration = LAND_S if h == h_to else (0.4 if careful else FAST_S)
-        look(arm, xy, roll, h=h, duration=duration, tilt=tilt, settle=careful)
-        if not careful:
-            continue
-        got = arm.tip()[2] - table
-        if got - h > block_mm / 1000:
-            r.note(f"blocked at {got * 100:.1f} cm (sent {h * 100:.1f} cm)")
-            look(arm, xy, roll, h=got + 0.03, duration=0.8, tilt=tilt)
+    if arm.tip()[2] - table > careful_from + 0.005:
+        arm.move_line([xy[0], xy[1], table + careful_from], speed=FAST_V, tilt=tilt, roll=roll, settle=False)
+    t1 = time.time()
+    above = table + h_to + top_m + 0.005             # commanded heights above this cannot touch it
+    lag, worst = [], [0.0]
+
+    def watch(k, q_cmd, q_now):
+        z_cmd, z_now = arm.kin.fk(q_cmd)[2, 3], arm.kin.fk(q_now)[2, 3]
+        e = z_now - z_cmd                               # > 0: the tip is higher than it was sent
+        if z_cmd > above:
+            lag.append(e)
             return False
-    r.note(f"down in {time.time() - t0:.1f} s ({len(hs)} steps, careful below {careful_from * 100:.1f} cm)")
+        base = max(lag) if lag else 0.003
+        worst[0] = max(worst[0], e - base)
+        return e - base > block_mm / 1000
+
+    reached = arm.move_line([xy[0], xy[1], table + h_to], speed=CAREFUL_V, tilt=tilt, roll=roll, watch=watch)
+    if not reached:
+        got = arm.tip()[2] - table
+        r.note(f"blocked at {got * 100:.1f} cm (tip {worst[0] * 1000:.0f} mm behind beyond its usual lag)")
+        look(arm, xy, roll, h=got + 0.03, duration=0.8, tilt=tilt)
+        return False
+    r.note(f"down in {time.time() - t0:.1f} s (fast {t1 - t0:.1f} s, careful below {careful_from * 100:.1f} cm; "
+           f"lag {max(lag) * 1000 if lag else 0:.0f} mm, worst extra {worst[0] * 1000:.0f} mm)")
     return True
 
 

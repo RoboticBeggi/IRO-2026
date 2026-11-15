@@ -137,7 +137,16 @@ class Arm:
                     raise MotionError(f"{name} does not answer when switched on ({e}). Check its cable and "
                                       "the 12 V supply, then: iro doctor") from e
                 time.sleep(0.02)
+            self._set_p_gains()
         return self
+
+    def _set_p_gains(self):
+        """Servo stiffness from config (devices.arm.p_gain), in servo RAM only (power-off forgets it)."""
+        for name, p in (self.dev.get("p_gain") or {}).items():
+            try:
+                self.bus.write("P_Coefficient", name, int(p), normalize=False, num_retry=2)
+            except (ConnectionError, KeyError) as e:
+                print(f"  (could not set {name} stiffness to {p}: {e}; it keeps its own)")
 
     def limp(self):
         """Torque off: the arm can be moved by hand (it will drop under gravity)."""
@@ -265,7 +274,9 @@ class Arm:
             still = 0 if moving else still + 1
             if still >= 4:
                 for j, e in err.items():
-                    goal[j] = int(np.clip(goal[j] + 0.6 * e, want[j] - max_comp, want[j] + max_comp))
+                    if abs(e) > tol:                    # leave arrived joints alone (15 Nov: nudging all
+                        #                                 of them made 2 of 14 moves hunt, 12-13 nudges)
+                        goal[j] = int(np.clip(goal[j] + 0.6 * e, want[j] - max_comp, want[j] + max_comp))
                 self.bus.sync_write("Goal_Position", goal, normalize=False)
                 still, nudges = 0, nudges + 1
         self.settle_log.append((time.time() - t0, nudges, arrived))
@@ -321,7 +332,9 @@ class Arm:
         seed[4] = roll
         for i in range(1, n + 1):
             p = p0 + (p1 - p0) * i / n
-            q, err = self.kin.ik_down(p, seed, tilt=tilt)
+            # seeded from the neighbouring point: 40 iterations are as good as 200 (15 Nov, logged
+            # descents: 2.18 vs 2.15 mm) and 3x faster near the edge of the reach
+            q, err = self.kin.ik_down(p, seed, tilt=tilt, iters=40)
             if err > 0.003:
                 raise MotionError(f"straight line: cannot reach {np.round(p, 3)} pointing down "
                                   f"({err * 1000:.0f} mm off)")
