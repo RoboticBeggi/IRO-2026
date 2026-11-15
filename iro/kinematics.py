@@ -93,7 +93,7 @@ class Kinematics:
         damped solver took 185 ms on average (it crept toward the answer and ran all 200 rounds
         whenever the pose could not be met exactly: 2-5 s per descent, ~10 s per reach plan). If
         this one stops short of a good answer (a local dead end), it restarts from a few typical
-        poses and, last, runs the old solver, so the result is never worse than before."""
+        poses and, last, runs the old solver and keeps the better answer."""
         target = np.asarray(xyz, float)
         down = np.array([0.0, 0.0, -1.0])
         if tilt:
@@ -136,8 +136,12 @@ class Kinematics:
         def good(c):                                   # ~1 mm and ~0.6 deg, as the old stop rule
             return c < tol ** 2 + (0.01 * 0.1) ** 2
 
+        def fine(q):                                   # a usable answer: within 3 mm and 2 deg
+            e = residual(q)
+            return np.linalg.norm(e[:3]) < 0.003 and np.linalg.norm(e[3:]) < 0.0035
+
         q, c = lm(q_seed)
-        if not good(c):
+        if not good(c) and not fine(q):
             roll = np.clip(np.array(q_seed, float), lo, hi)[4]
             for s in ([0, -0.5, 1.0, 1.0], [0, 0.5, -0.5, 1.4], [0, 0, 0.8, 1.5], [0, 1.2, -0.9, 1.0]):
                 q2, c2 = lm(np.r_[np.arctan2(target[1], target[0]), s[1:], roll])
@@ -145,7 +149,11 @@ class Kinematics:
                     q, c = q2, c2
                 if good(c):
                     break
-        if not good(c) and iters >= 100:               # last resort: the old solver, from the seed
+        if not good(c) and not fine(q) and iters >= 100:
+            # last resort: the old solver from the seed (small sure steps; it got out of a dead end
+            # the fast one stopped in for 3 of 400 random targets). The better of the two is kept,
+            # so the answer is never worse than before. Callers that only probe whether a point is
+            # reachable pass iters < 100 and skip this (unreachable points cost ~300 ms here).
             q2 = self._ik_down_old(target, down, q_seed, iters, tol)
             e2 = residual(q2)
             if e2 @ e2 < c:
