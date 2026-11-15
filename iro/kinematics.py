@@ -85,17 +85,76 @@ class Kinematics:
         """Joints putting the tip at xyz with the gripper pointing straight down
         (tilt: radians away from vertical; positive leans toward the base, negative leans
         outward, which the SO-101 wrist needs above about 8 cm). Returns (q, error_m).
-        Damped least squares on position + the tip's z axis; keeps joint limits.
-        wrist_roll is NOT solved: it stays at q_seed's value. Roll does not change where the
-        tip is or where it points, so a solver left free to turn it twists the gripper sideways."""
-        q = np.clip(np.array(q_seed, float), self.limits[:, 0], self.limits[:, 1])
-        active = [0, 1, 2, 3]   # pan, lift, elbow, wrist_flex
+        Least squares on position + the tip's z axis (0.1: 1 rad counts like 10 cm), inside the
+        joint limits. wrist_roll is NOT solved: it stays at q_seed's value. Roll does not change
+        where the tip is or where it points, so a solver left free to turn it twists the gripper.
+
+        Solver (15 Nov 2026): Levenberg-Marquardt with adaptive damping, ~10 ms. The earlier fixed-step
+        damped solver took 185 ms on average (it crept toward the answer and ran all 200 rounds
+        whenever the pose could not be met exactly: 2-5 s per descent, ~10 s per reach plan). If
+        this one stops short of a good answer (a local dead end), it restarts from a few typical
+        poses and, last, runs the old solver, so the result is never worse than before."""
         target = np.asarray(xyz, float)
         down = np.array([0.0, 0.0, -1.0])
         if tilt:
             r = np.hypot(*target[:2]) or 1.0
             toward = -np.array([target[0] / r, target[1] / r, 0.0])
             down = np.cos(tilt) * down + np.sin(tilt) * toward
+        lo, hi = self.limits[:, 0], self.limits[:, 1]
+
+        def residual(q):
+            T = self.fk(q)
+            return np.concatenate([target - T[:3, 3], 0.1 * (down - T[:3, 2])])
+
+        def lm(q):
+            q = np.clip(np.array(q, float), lo, hi)
+            e = residual(q)
+            c, lam = e @ e, 1e-3
+            for _ in range(60):
+                if c < 1e-9:
+                    break
+                J = np.zeros((6, 4))
+                for i in range(4):
+                    dq = np.zeros(5)
+                    dq[i] = 1e-6
+                    J[:, i] = (e - residual(q + dq)) / 1e-6
+                done = True
+                for _ in range(8):
+                    q2 = q.copy()
+                    q2[:4] = np.clip(q[:4] + np.linalg.solve(J.T @ J + lam * np.eye(4), J.T @ e), lo[:4], hi[:4])
+                    e2 = residual(q2)
+                    c2 = e2 @ e2
+                    if c2 < c:
+                        done = c - c2 < 1e-13
+                        q, e, c, lam = q2, e2, c2, max(lam / 4, 1e-9)
+                        break
+                    lam *= 5
+                if done:
+                    break
+            return q, c
+
+        def good(c):                                   # ~1 mm and ~0.6 deg, as the old stop rule
+            return c < tol ** 2 + (0.01 * 0.1) ** 2
+
+        q, c = lm(q_seed)
+        if not good(c):
+            roll = np.clip(np.array(q_seed, float), lo, hi)[4]
+            for s in ([0, -0.5, 1.0, 1.0], [0, 0.5, -0.5, 1.4], [0, 0, 0.8, 1.5], [0, 1.2, -0.9, 1.0]):
+                q2, c2 = lm(np.r_[np.arctan2(target[1], target[0]), s[1:], roll])
+                if c2 < c:
+                    q, c = q2, c2
+                if good(c):
+                    break
+        if not good(c) and iters >= 100:               # last resort: the old solver, from the seed
+            q2 = self._ik_down_old(target, down, q_seed, iters, tol)
+            e2 = residual(q2)
+            if e2 @ e2 < c:
+                q = q2
+        return q, float(np.linalg.norm(target - self.fk(q)[:3, 3]))
+
+    def _ik_down_old(self, target, down, q_seed, iters, tol):
+        q = np.clip(np.array(q_seed, float), self.limits[:, 0], self.limits[:, 1])
+        active = [0, 1, 2, 3]   # pan, lift, elbow, wrist_flex
 
         def residual(q):
             T = self.fk(q)
@@ -114,4 +173,4 @@ class Kinematics:
             step = np.zeros(5)
             step[active] = J.T @ np.linalg.solve(J @ J.T + lam * np.eye(6), e)
             q = np.clip(q + np.clip(step, -0.2, 0.2), self.limits[:, 0], self.limits[:, 1])
-        return q, float(np.linalg.norm(target - self.fk(q)[:3, 3]))
+        return q

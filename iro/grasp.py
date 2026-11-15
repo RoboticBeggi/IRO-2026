@@ -248,12 +248,15 @@ class SideCam:
     what knocks the object over (22 Oct: a standing tape was tipped flat by the descent).
     Best effort: no OAK-D, no side view; picking goes on."""
 
-    def __init__(self, r, fps=6):
+    def __init__(self, r, fps=6, scout=None):
         import threading
-        self.r, self.stage, self.ok, self.stop_ = r, "start", False, False
+        self.r, self.stage, self.ok, self.stop_, self.scout = r, "start", False, False, scout
         try:
-            from iro.oak import Oak
-            self.oak = Oak(ir=0.0)
+            if scout is not None:                  # one OAK-D: the scout owns it, reads are locked
+                self.oak = scout
+            else:
+                from iro.oak import Oak
+                self.oak = Oak(ir=0.0)
             self.ok = True
         except Exception as e:                     # noqa: BLE001 - side view is optional
             r.note(f"no OAK-D side view: {str(e)[:80]}")
@@ -275,7 +278,8 @@ class SideCam:
         if self.ok:
             self.stop_ = True
             self.t.join(timeout=3)
-            self.oak.close()
+            if self.scout is None:
+                self.oak.close()
 
 
 def holding(arm, grip, r, squeeze=12):
@@ -651,6 +655,36 @@ def descend(arm, xy, roll, h_to, r, top_m=0.08, block_mm=8, tilt=0.0):
     return True
 
 
+def roll_across(arm, P, yaw, h=LOOK_H):
+    """(wrist roll, how well 0-1) that makes the jaws close ACROSS an object's long side (direction
+    `yaw` on the floor) when the gripper is straight down over floor point P. From the arm's own
+    model (which way the jaws close for given joints), no picture needed. The jaw direction turns
+    1:1 with the roll when the gripper points down; the nearest of the two equivalent rolls
+    (180 deg apart) inside the joint's range is taken."""
+    from iro.efad import jaw_direction
+    from iro.pick import pick_config
+    xyz = [P[0], P[1], pick_config()["table_z"] + h]
+    level = arm.level_roll()
+    lo, hi = arm.kin.limits[4]
+
+    def jaw_angle(roll):
+        seed = arm.joints()
+        seed[4] = roll
+        q, _ = arm.kin.ik_down(xyz, seed, iters=60)
+        d = jaw_direction(arm.kin, q)
+        return np.arctan2(d[1], d[0])
+    a0 = jaw_angle(level)
+    sgn = 1.0 if np.cos(jaw_angle(level + 0.2) - a0 - 0.2) > np.cos(jaw_angle(level + 0.2) - a0 + 0.2) else -1.0
+    want = yaw + np.pi / 2                                   # across the long side
+    d = (want - a0 + np.pi / 2) % np.pi - np.pi / 2          # jaws are a line: (-90, 90] deg
+    cands = [level + sgn * (d + k * np.pi) for k in (0, 1, -1)]
+    cands = [c for c in cands if lo + 0.05 <= c <= hi - 0.05]
+    if not cands:
+        return level, 0.0
+    roll = min(cands, key=lambda c: abs(c - level))
+    return roll, float(abs(np.cos(jaw_angle(roll) - want)))
+
+
 def find_from(arm, eye, starts, roll):
     """Look from each start pose until the object is seen. (xy, frame, box, centre, peak) or None."""
     for xy in starts:
@@ -679,8 +713,28 @@ def cmd_pick(name, drop=False, attempts=3):
     target = np.array(G["grasp_pixel"])
     off = np.array(G.get("look_offset_gripper_m", [0.0, 0.0]))
     r = run(f"pick-{name}")
+    t_start = time.time()
+    # the OAK-D (the scout) starts up in the background while the wrist camera's models load
+    import threading
+    box_ = {}
+
+    def open_scout():
+        try:
+            from iro.oakguide import Scout
+            box_["scout"] = Scout()
+        except Exception as e:                     # noqa: BLE001 - without it: the old search from above
+            box_["why"] = str(e)[:100]
+    th = threading.Thread(target=open_scout, daemon=True)
+    th.start()
     eye = DownEye(name, r)
-    side = SideCam(r)
+    th.join(timeout=25)
+    scout, model = box_.get("scout"), wrist_model()
+    if scout is None:
+        r.note(f"no OAK-D scout ({box_.get('why', 'still starting')}): searching with the wrist camera")
+    elif model is None:
+        r.note("no wrist camera model (iro pick calibrate NAME): searching with the wrist camera")
+    side = SideCam(r, scout=scout)
+    r.note(f"ready in {time.time() - t_start:.1f} s")
     if G.get("top_peak"):
         eye.min_peak = 0.5 * G["top_peak"]          # seen from above it must match like it did then
     starts = list(SEARCH)
@@ -691,77 +745,121 @@ def cmd_pick(name, drop=False, attempts=3):
                 roll = level
                 set_gripper(arm, 0)
                 tag = f"a{attempt}_"
-                # 1. find it from above
-                got = find_from(arm, eye, starts, roll)
-                if got is None:
-                    f = eye.frame()
-                    eye.show(f, f"{name} not found from above", tag=tag + "notfound")
-                    print(f"1. The {name} is not in the search area (looked from {len(starts)} places).")
-                    return 1
-                xy, f, box, c, peak = got
-                pc = eye.precise_centre(f, box)
-                c = pc if pc is not None else c
-                eye.show(f, f"1. found {name} (match {peak:.2f})", box, target, tag + "1_found")
-                print(f"{'' if attempt == 1 else f'[try {attempt}] '}1. found it (match {peak:.2f})")
-                # 2. centre it on the grasp pixel
-                # steering from the floor texture: an object at the picture's edge cannot be lost by a
-                # test move (22 Oct: a knocked-over tape at the bottom edge was)
-                J = floor_jacobian(arm, eye, xy, roll)
-                xy, f, box, c = centre(arm, eye, xy, roll, J, target, c)
-                eye.show(f, "2. centred", box, target, tag + "2_centred")
-                log_pose(arm, r, "centred", attempt=attempt)
-                P0 = xy - rot(heading(arm)) @ off
-                if plan_reach(arm, P0, roll, G["grasp_h_m"], quick=True) is None:
-                    dist = np.linalg.norm(P0) * 100
-                    eye.show(f, f"{dist:.0f} cm out: out of reach", box, target, tag + "2_toofar")
-                    print(f"2. It is {dist:.0f} cm from the base: too far even leaning the gripper "
-                          f"{max_lean_deg():.0f} deg (iro arm reach). Move it closer (under ~35 cm) and run again.")
-                    r.note(f"out of reach at {np.round(P0, 3).tolist()}")
-                    return 1
-                # 3. turn the jaws across its narrow side
-                out = eye.outline(f, box)
-                if out is not None:
-                    d = wrap90(out[1] - G["jaw_axis_deg"])
-                    if abs(d) > 8:
-                        P = xy - rot(heading(arm)) @ off        # the object's floor point: fixed while turning
-                        sign = G.get("roll_sign", 1)
-
-                        def turn(s):
-                            r2 = roll + s * np.radians(d)
-                            xy2 = orbit_xy(arm, P, r2, off)
-                            look(arm, xy2, r2)
-                            got_ = eye.find(near=target, radius=200)
-                            if got_[1] is None:
-                                got_ = eye.find()           # anywhere in the picture (see centre())
-                            r.note(f"turned {s * d:+.0f} deg: look ({xy2[0]:.3f}, {xy2[1]:.3f}), "
-                                   f"{'seen' if got_[1] is not None else 'NOT seen'}")
-                            return r2, xy2, got_
-
-                        roll2, xy2, (f, box, c, _) = turn(sign)
-                        out2 = eye.outline(f, box) if box is not None else None
-                        d2 = wrap90(out2[1] - G["jaw_axis_deg"]) if out2 else None
-                        if d2 is None or abs(d2) > abs(d) * 0.7:   # turned the wrong way (or unsure): try the other
-                            roll3, xy3, got3 = turn(-sign)
-                            out3 = eye.outline(got3[0], got3[1]) if got3[1] is not None else None
-                            d3 = wrap90(out3[1] - G["jaw_axis_deg"]) if out3 else None
-                            if d3 is not None and (d2 is None or abs(d3) < abs(d2)):
-                                sign = -sign
-                                roll2, xy2, (f, box, c, _) = roll3, xy3, got3
-                                G["roll_sign"] = sign
-                                gf.write_text(yaml.safe_dump(G))
-                                r.note(f"wrist roll sign flipped to {sign} (left {abs(d3):.0f} deg vs {abs(d2 or 90):.0f})")
-                            elif d2 is not None:
-                                roll2, xy2, (f, box, c, _) = turn(sign)    # the first way was the better one
-                        roll, xy = roll2, xy2
+                # 0. the OAK-D scout: where it is and which way it lies, before the arm moves. Then
+                #    straight to the look pose that puts it on the grasp pixel, jaws already turned.
+                o = None
+                if scout is not None and model is not None:
+                    try:
+                        o = scout.find(name)
+                    except Exception as e:                 # noqa: BLE001 - camera hiccup: search instead
+                        r.note(f"scout failed: {str(e)[:80]}")
+                    if o is not None:
+                        P = o["centre"]
+                        roll_g, across = roll_across(arm, P, o["yaw"])
+                        r.snap(tag + "0_scout", scout.draw(pick=o))
+                        r.note(f"scout: {name} at ({P[0]:.3f}, {P[1]:.3f}), {o['length'] * 100:.1f} x {o['width'] * 100:.1f} x "
+                               f"{o['height'] * 100:.1f} cm, long side {np.degrees(o['yaw']):+.0f} deg; roll "
+                               f"{np.degrees(roll_g - level):+.0f} deg (jaws {across * 100:.0f}% across)")
+                        try:
+                            xy = orbit_xy(arm, P, roll_g, off)
+                            look(arm, xy, roll_g)
+                            f, box, c, peak = see(arm, eye, near=target, radius=220)
+                        except MotionError as e:
+                            r.note(f"scout look pose not reachable ({e}): searching")
+                            box = None
                         if box is None:
-                            eye.show(f, "3. lost it after turning", tag=tag + "3_lost")
-                            raise RuntimeError("lost the object while turning the jaws")
-                        J = floor_jacobian(arm, eye, xy, roll)      # the picture is turned now
-                        xy, f, box, c = centre(arm, eye, xy, roll, J, target, c)
-                        out = eye.outline(f, box)
-                        print(f"3. turned the jaws {d:+.0f} deg across it")
+                            r.note("the wrist camera did not confirm the scout's object: searching")
+                            o = None
+                if o is not None:
+                    roll = roll_g
+                    eye.show(f, f"1. found {name} via the OAK-D (match {peak:.2f}, {np.linalg.norm(c - target):.0f} px off)",
+                             box, target, tag + "1_found")
+                    print(f"{'' if attempt == 1 else f'[try {attempt}] '}1. the OAK-D found it at {P[0] * 100:.0f}, "
+                          f"{P[1] * 100:+.0f} cm; wrist camera confirms (match {peak:.2f}, {np.linalg.norm(c - target):.0f} px from the mark)")
+                    r.note(f"aim: {np.linalg.norm(c - target):.0f} px from the grasp pixel at first sight")
+                    xy, f, box, c = centre2(arm, eye, xy, roll, model[0], target, c)
+                    eye.show(f, "2. centred", box, target, tag + "2_centred")
+                    log_pose(arm, r, "centred", attempt=attempt)
+                    P0 = xy - rot(heading(arm)) @ off
+                    if plan_reach(arm, P0, roll, G["grasp_h_m"], quick=True) is None:
+                        print(f"2. It is {np.linalg.norm(P0) * 100:.0f} cm from the base: out of reach. Move it closer.")
+                        r.note(f"out of reach at {np.round(P0, 3).tolist()}")
+                        return 1
+                    out = eye.outline(f, box)
+                if o is None:
+                    # 1. find it from above (no scout, or it did not see it)
+                    got = find_from(arm, eye, starts, roll)
+                    if got is None:
+                        f = eye.frame()
+                        eye.show(f, f"{name} not found from above", tag=tag + "notfound")
+                        print(f"1. The {name} is not in the search area (looked from {len(starts)} places).")
+                        return 1
+                    xy, f, box, c, peak = got
+                    pc = eye.precise_centre(f, box)
+                    c = pc if pc is not None else c
+                    eye.show(f, f"1. found {name} (match {peak:.2f})", box, target, tag + "1_found")
+                    print(f"{'' if attempt == 1 else f'[try {attempt}] '}1. found it (match {peak:.2f})")
+                    # 2. centre it on the grasp pixel
+                    # steering from the floor texture: an object at the picture's edge cannot be lost by a
+                    # test move (22 Oct: a knocked-over tape at the bottom edge was)
+                    J = floor_jacobian(arm, eye, xy, roll)
+                    xy, f, box, c = centre(arm, eye, xy, roll, J, target, c)
+                    eye.show(f, "2. centred", box, target, tag + "2_centred")
+                    log_pose(arm, r, "centred", attempt=attempt)
+                    P0 = xy - rot(heading(arm)) @ off
+                    if plan_reach(arm, P0, roll, G["grasp_h_m"], quick=True) is None:
+                        dist = np.linalg.norm(P0) * 100
+                        eye.show(f, f"{dist:.0f} cm out: out of reach", box, target, tag + "2_toofar")
+                        print(f"2. It is {dist:.0f} cm from the base: too far even leaning the gripper "
+                              f"{max_lean_deg():.0f} deg (iro arm reach). Move it closer (under ~35 cm) and run again.")
+                        r.note(f"out of reach at {np.round(P0, 3).tolist()}")
+                        return 1
+                    # 3. turn the jaws across its narrow side
+                    out = eye.outline(f, box)
+                    if out is not None:
+                        d = wrap90(out[1] - G["jaw_axis_deg"])
+                        if abs(d) > 8:
+                            P = xy - rot(heading(arm)) @ off        # the object's floor point: fixed while turning
+                            sign = G.get("roll_sign", 1)
+
+                            def turn(s):
+                                r2 = roll + s * np.radians(d)
+                                xy2 = orbit_xy(arm, P, r2, off)
+                                look(arm, xy2, r2)
+                                got_ = eye.find(near=target, radius=200)
+                                if got_[1] is None:
+                                    got_ = eye.find()           # anywhere in the picture (see centre())
+                                r.note(f"turned {s * d:+.0f} deg: look ({xy2[0]:.3f}, {xy2[1]:.3f}), "
+                                       f"{'seen' if got_[1] is not None else 'NOT seen'}")
+                                return r2, xy2, got_
+
+                            roll2, xy2, (f, box, c, _) = turn(sign)
+                            out2 = eye.outline(f, box) if box is not None else None
+                            d2 = wrap90(out2[1] - G["jaw_axis_deg"]) if out2 else None
+                            if d2 is None or abs(d2) > abs(d) * 0.7:   # turned the wrong way (or unsure): try the other
+                                roll3, xy3, got3 = turn(-sign)
+                                out3 = eye.outline(got3[0], got3[1]) if got3[1] is not None else None
+                                d3 = wrap90(out3[1] - G["jaw_axis_deg"]) if out3 else None
+                                if d3 is not None and (d2 is None or abs(d3) < abs(d2)):
+                                    sign = -sign
+                                    roll2, xy2, (f, box, c, _) = roll3, xy3, got3
+                                    G["roll_sign"] = sign
+                                    gf.write_text(yaml.safe_dump(G))
+                                    r.note(f"wrist roll sign flipped to {sign} (left {abs(d3):.0f} deg vs {abs(d2 or 90):.0f})")
+                                elif d2 is not None:
+                                    roll2, xy2, (f, box, c, _) = turn(sign)    # the first way was the better one
+                            roll, xy = roll2, xy2
+                            if box is None:
+                                eye.show(f, "3. lost it after turning", tag=tag + "3_lost")
+                                raise RuntimeError("lost the object while turning the jaws")
+                            J = floor_jacobian(arm, eye, xy, roll)      # the picture is turned now
+                            xy, f, box, c = centre(arm, eye, xy, roll, J, target, c)
+                            out = eye.outline(f, box)
+                            print(f"3. turned the jaws {d:+.0f} deg across it")
                 # 4. how wide to open: room to spare, the last centimetres are blind
                 width = eye.extent(out[2], G["jaw_axis_deg"]) * G["mm_per_px"] if out is not None else None
+                if o is not None and o.get("completed") and across > 0.94:
+                    width = o["width"] * 1000        # true size: the wrist's slanted view misjudges it (15 Nov)
                 w = width or G["taught_width_mm"]
                 if w + 2 * 8 > max_open_m() * 1000:             # < 8 mm room each side, blind descent: no
                     eye.show(f, f"4. {w:.0f} mm across: too wide to grasp safely", box, target, tag + "4_toowide")
@@ -842,6 +940,14 @@ def cmd_pick(name, drop=False, attempts=3):
                 f, *_ = eye.find()
                 eye.show(f, f"6. holding the {name}", tag=tag + "6_lifted")
                 print(f"6. Holding the {name}, 10 cm up (try {attempt}).")
+                if scout is not None:
+                    try:
+                        left = [q for q in scout.objects(2) if np.linalg.norm(q["centre"] - gxy) < 0.06 and q["height"] > 0.015]
+                        r.note("OAK-D: the floor is empty where it stood" if not left else
+                               f"OAK-D: something still stands there ({left[0]['height'] * 100:.1f} cm tall)")
+                    except Exception:                      # noqa: BLE001 - a bonus check
+                        pass
+                r.note(f"whole pick: {time.time() - t_start:.1f} s")
                 r.note(f"picked on try {attempt}: width {grip['width_mm']:.1f} mm at ({gxy[0]:.3f}, {gxy[1]:.3f})")
                 if drop:
                     side.stage = f"{attempt}: putting it down"
@@ -859,6 +965,8 @@ def cmd_pick(name, drop=False, attempts=3):
     finally:
         eye.close()
         side.close()
+        if scout is not None:
+            scout.close()
 
 
 def main():
