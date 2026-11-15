@@ -333,8 +333,20 @@ def gripper_raw(arm, pct):
 
 
 def set_gripper(arm, pct, wait=0.8):
-    arm.bus.write("Goal_Position", "gripper", gripper_raw(arm, pct), normalize=False)
-    time.sleep(wait)
+    """Jaws to pct. Returns when they are there or have stopped (at most `wait` s; wait=0: do not
+    wait at all, e.g. opening while the arm moves on). 15 Nov: was a fixed 0.8 s every time."""
+    goal = gripper_raw(arm, pct)
+    arm.bus.write("Goal_Position", "gripper", goal, normalize=False)
+    t0, last, since = time.time(), None, time.time()
+    while time.time() - t0 < wait:
+        time.sleep(0.02)
+        pos = arm.bus.read("Present_Position", "gripper", normalize=False)
+        if abs(pos - goal) <= 12:
+            break
+        if last is None or abs(pos - last) > 2:
+            last, since = pos, time.time()
+        elif time.time() - since > 0.12 and time.time() - t0 > 0.15:      # stopped short (holding something)
+            break
 
 
 def _stl(path):

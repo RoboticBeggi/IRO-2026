@@ -176,7 +176,7 @@ def plan_reach(arm, xy, roll, h_grasp, step_deg=5, quick=False):
         for s in [arm.joints()] + [np.array(x) for x in SEEDS]:
             s = np.array(s, float)
             s[4] = roll
-            if arm.kin.ik_down([xy[0], xy[1], table + h], s, tilt=tilt)[1] < 0.003:
+            if arm.kin.ik_down([xy[0], xy[1], table + h], s, tilt=tilt, iters=40)[1] < 0.003:
                 return True
         return False
 
@@ -215,7 +215,7 @@ def orbit_xy(arm, P, roll, off, h=LOOK_H, iters=20):
     seed[4] = roll
     xy = np.asarray(P, float) + rot(heading(arm)) @ off
     for _ in range(iters):
-        q, _ = arm.kin.ik_down([xy[0], xy[1], table + h], seed)
+        q, _ = arm.kin.ik_down([xy[0], xy[1], table + h], seed, iters=40)
         x = arm.kin.fk(q, "gripper_link")[:3, 0]
         new = np.asarray(P, float) + rot(np.arctan2(x[1], x[0])) @ off
         if np.linalg.norm(new - xy) < 2e-4:
@@ -613,6 +613,26 @@ def tallest_m(name, default=0.08):
     return max(sizes) if sizes else default
 
 
+LIFT_V = 0.12        # m/s top tip speed lifting / carrying a held object
+PLACE_V = 0.06       # m/s top speed setting it down (minimum-jerk: touches down at ~0)
+
+
+def pick_table():
+    from iro.pick import pick_config
+    return pick_config()["table_z"]
+
+
+def put_down(arm, xy, roll, grasp_h, open_pct, over_h, tilt=0.0):
+    """Set a held object down at floor point xy (straight down, soft), let go, rise."""
+    from iro.measure import set_gripper
+    table = pick_table()
+    if np.linalg.norm(arm.tip()[:2] - xy) > 0.004:
+        look(arm, xy, roll, h=max(0.10, arm.tip()[2] - table), tilt=tilt, settle=False)
+    arm.move_line([xy[0], xy[1], table + grasp_h + 0.004], speed=PLACE_V, tilt=tilt, roll=roll)
+    set_gripper(arm, open_pct, wait=0.6)
+    arm.move_line([xy[0], xy[1], table + over_h], speed=FAST_V, tilt=tilt, roll=roll, settle=False)
+
+
 FAST_V = 0.15        # m/s top tip speed above the object (free air)
 CAREFUL_V = 0.04     # m/s top speed near it; minimum-jerk slows to 0 at the end: soft landing
 
@@ -871,7 +891,7 @@ def cmd_pick(name, drop=False, attempts=3):
                 # closed from fully open, so the taught grasp pixel matches this jaw position)
                 want = max_open_m() * 1000
                 open_pct = pct_for(want)
-                set_gripper(arm, open_pct)
+                set_gripper(arm, open_pct, wait=0)          # opens while the arm moves over it
                 eye.show(f, f"4. opening {want:.0f} mm for {w:.0f} mm", box, target, tag + "4_open")
                 print(f"2-4. centred, about {w:.0f} mm across: opening {want:.0f} mm")
                 look_xy = xy.copy()
@@ -888,11 +908,17 @@ def cmd_pick(name, drop=False, attempts=3):
                           f"({np.linalg.norm(gxy) * 100:.0f} cm out)")
                 r.note(f"over at {over_h * 100:.0f} cm, lean {np.degrees(-tilt):.0f} deg")
                 side.stage = f"{attempt}: over it, going down (lean {np.degrees(-tilt):.0f})"
-                look(arm, gxy, roll, h=over_h, duration=1.5, tilt=tilt)
+                look(arm, gxy, roll, h=over_h, tilt=tilt, settle=False)
                 log_pose(arm, r, "over", attempt=attempt, grasp_xy=np.round(gxy, 4).tolist())
                 reached = descend(arm, gxy, roll, G["grasp_h_m"], r, top_m=tallest_m(name), tilt=tilt)
                 side.stage = f"{attempt}: closing" if reached else f"{attempt}: blocked"
-                grip = close_on(arm, open_pct, r, hold=True) if reached else None
+                grip = None
+                if reached:
+                    # quickly to 12 mm wider than it is, then feel for the contact from there (the
+                    # contact detector needs ~8 free readings first: 12 mm is ~7 steps of 2 %)
+                    pre = min(open_pct, pct_for(w + 12))
+                    set_gripper(arm, pre, wait=0.5)
+                    grip = close_on(arm, pre, r, hold=True)
                 log_pose(arm, r, "closed" if grip else ("blocked" if not reached else "missed"), attempt=attempt)
                 if grip is None:
                     set_gripper(arm, open_pct)
@@ -927,8 +953,7 @@ def cmd_pick(name, drop=False, attempts=3):
                     return 1
                 # 6. lift and check it is still held
                 side.stage = f"{attempt}: lifting"
-                look(arm, gxy, roll, h=0.10, duration=2.0, tilt=tilt)
-                time.sleep(0.3)
+                arm.move_line([gxy[0], gxy[1], pick_table() + 0.10], speed=LIFT_V, tilt=tilt, roll=roll)
                 held, mm = holding(arm, grip, r)
                 if not held:
                     print(f"6. Not holding it after lifting: a squeeze closed the jaws to {mm:.0f} mm (gripped at "
@@ -951,9 +976,7 @@ def cmd_pick(name, drop=False, attempts=3):
                 r.note(f"picked on try {attempt}: width {grip['width_mm']:.1f} mm at ({gxy[0]:.3f}, {gxy[1]:.3f})")
                 if drop:
                     side.stage = f"{attempt}: putting it down"
-                    look(arm, gxy, roll, h=G["grasp_h_m"] + 0.005, duration=2.0, tilt=tilt)
-                    set_gripper(arm, open_pct)
-                    look(arm, gxy, roll, h=over_h, duration=2.0, tilt=tilt)
+                    put_down(arm, gxy, roll, G["grasp_h_m"], open_pct, over_h, tilt)
                     print("   Put it back down.")
                 return 0
             print(f"Gave up after {attempts} tries. Recording: {r.dir} (iro review)")

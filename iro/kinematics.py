@@ -125,7 +125,7 @@ class Kinematics:
                     e2 = residual(q2)
                     c2 = e2 @ e2
                     if c2 < c:
-                        done = c - c2 < 1e-13
+                        done = c - c2 < 1e-6 * c + 1e-14      # converged (also onto a compromise)
                         q, e, c, lam = q2, e2, c2, max(lam / 4, 1e-9)
                         break
                     lam *= 5
