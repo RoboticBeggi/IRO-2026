@@ -417,9 +417,20 @@ def cmd_teach(name):
 def centre(arm, eye, xy, roll, J, target, c, tries=15):
     """Step sideways until the object's OUTLINE centre sits on the target pixel. (xy, frame, box, c)."""
     Jinv = np.linalg.inv(J)
+    f = box = None
     for k in range(tries):
         err = c - target
         if np.linalg.norm(err) < SERVO_TOL_PX:
+            if box is None:                             # centred already: no step, so no picture yet
+                f, box, c2, _ = eye.find(near=c, radius=150)
+                if box is None:
+                    f, box, c2, _ = eye.find()
+                if box is None:
+                    raise RuntimeError("lost the object while centring")
+                pc = eye.precise_centre(f, box)
+                c = pc if pc is not None else c2
+                if np.linalg.norm(c - target) >= SERVO_TOL_PX:
+                    continue                            # the fresh picture says it is off after all: step
             break
         step = np.clip(-0.7 * Jinv @ err, -0.03, 0.03)
         xy = xy + step
