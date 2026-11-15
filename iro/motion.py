@@ -30,8 +30,65 @@ SEEDS = [np.radians(s) for s in ([0, 0, 0, 0, 0], [0, -30, 60, 60, 0], [0, 30, -
 CAL = ROOT / "arm" / "calibration" / "robots" / "so_follower" / f"{os.environ.get('SO101_ID', 'iro_follower')}.json"
 
 
+SAG_FILE = ROOT / "arm" / "calibration" / "sag_model.json"
+
+
 class MotionError(RuntimeError):
     pass
+
+
+class SagModel:
+    """Where each joint really stops versus where it is sent. LeRobot runs the servos soft (P 16), so
+    gravity and friction leave them 30-40 counts short (20 Oct). Learnt from every move that settled:
+    the goal offset (counts) that made joint j arrive = a_j * g_j(q) + b_j * s_j, where g_j is gravity's
+    lever on the joint (how much the tip height changes per radian of it) and s_j the direction the
+    joint came from (+1/-1, 0 = did not move). Aimed for ahead of time, so most moves arrive without
+    correcting; the settle step still checks. Old moves count less (the battery and the servos warm
+    up), and it is only used after MIN_N moves. Saved in arm/calibration/ (backed up)."""
+    MIN_N, DECAY, CLIP = 8, 0.97, 60
+
+    def __init__(self, kin, path=SAG_FILE):
+        self.kin, self.path = kin, path
+        self.A = np.zeros((len(JOINTS), 2, 2))
+        self.y = np.zeros((len(JOINTS), 2))
+        self.n = np.zeros(len(JOINTS), int)
+        try:
+            d = json.loads(path.read_text())
+            self.A, self.y, self.n = np.array(d["A"]), np.array(d["y"]), np.array(d["n"], int)
+        except (OSError, ValueError, KeyError):
+            pass
+
+    def features(self, q, s):
+        q = np.asarray(q, float)
+        z0 = self.kin.fk(q)[2, 3]
+        g = []
+        for i in range(len(JOINTS)):
+            d = np.zeros(len(JOINTS))
+            d[i] = 1e-4
+            g.append((self.kin.fk(q + d)[2, 3] - z0) / 1e-4)
+        return np.c_[g, np.asarray(s, float)]
+
+    def predict(self, q, s):
+        X, out = self.features(q, s), np.zeros(len(JOINTS))
+        for j in range(len(JOINTS)):
+            if self.n[j] >= self.MIN_N:
+                w = np.linalg.solve(self.A[j] + 1e-4 * np.eye(2), self.y[j])
+                out[j] = np.clip(X[j] @ w, -self.CLIP, self.CLIP)
+        return out
+
+    def learn(self, q, s, offset):
+        X = self.features(q, s)
+        for j in range(len(JOINTS)):
+            self.A[j] = self.DECAY * self.A[j] + np.outer(X[j], X[j])
+            self.y[j] = self.DECAY * self.y[j] + X[j] * offset[j]
+            self.n[j] += 1
+
+    def save(self):
+        try:
+            self.path.write_text(json.dumps({"A": self.A.tolist(), "y": self.y.tolist(), "n": self.n.tolist(),
+                                             "note": "iro.motion.SagModel: learnt goal offsets (counts)"}))
+        except OSError:
+            pass
 
 
 class Arm:
@@ -45,6 +102,8 @@ class Arm:
         self.max_speed = max_speed or self.pick["max_joint_speed"]
         self.dry_run = dry_run
         self.kin = Kinematics()
+        self.sag = SagModel(self.kin)
+        self.settle_log = []                            # (seconds, nudges, arrived) per settle
         self.cal = json.loads(CAL.read_text())
         wrapped = [j for j in JOINTS[:-1] if self.cal[j]["range_min"] <= 0 and self.cal[j]["range_max"] >= TICKS - 1]
         if wrapped:
@@ -91,6 +150,8 @@ class Arm:
         self.bus.enable_torque()
 
     def __exit__(self, *exc):
+        if not self.dry_run:
+            self.sag.save()
         self._cm.__exit__(*exc)  # torque stays on: the arm holds its pose (and anything it carries)
 
     def joints(self) -> np.ndarray:
@@ -156,34 +217,61 @@ class Arm:
         if self.dry_run:
             print(f"  [dry run] move {np.round(np.degrees(q0), 0)} -> {np.round(np.degrees(q_target), 0)} deg in {duration:.1f}s")
             return
+        # aim past the target by the learnt sag, faded in along the move (no jump at the end)
+        s_dir = self._approach(q0, q_target)
+        pred = self.sag.predict(q_target, s_dir) if settle else np.zeros(len(JOINTS))
         rate, t0 = 50.0, time.time()
         while True:
             s = min((time.time() - t0) / duration, 1.0)
             k = 10 * s**3 - 15 * s**4 + 6 * s**5          # minimum-jerk profile
             q = q0 + k * (q_target - q0)
-            self.bus.sync_write("Goal_Position", {j: self.to_raw(j, a) for j, a in zip(JOINTS, q)}, normalize=False)
+            self.bus.sync_write("Goal_Position", self._goal(q, k * pred), normalize=False)
             if s >= 1.0:
                 break
             time.sleep(1 / rate)
         if settle:                                     # off = keep moving (passing points)
-            self._settle(q_target)
+            self._settle(q_target, self._goal(q_target, pred), s_dir)
         self._check_servos()
 
-    def _settle(self, q_target, tol=3, max_comp=90, rounds=4):
-        """Make the joints really arrive. LeRobot runs the servos soft (P gain 16), so gravity and
-        friction leave them 30-40 counts (3-4 deg) short, by a different amount depending on the
-        approach direction. Nudge each goal by the measured error until within `tol` counts."""
+    @staticmethod
+    def _approach(q0, q1):
+        """Which way each joint moves (+1/-1), 0 when it hardly moves (< 0.5 deg)."""
+        d = np.asarray(q1, float) - np.asarray(q0, float)
+        return np.where(np.abs(d) < np.radians(0.5), 0.0, np.sign(d))
+
+    def _goal(self, q, extra=None):
+        """Raw goal positions for joint angles q, plus `extra` counts per joint (sag aim)."""
+        extra = np.zeros(len(JOINTS)) if extra is None else extra
+        return {j: int(round(self.to_raw(j, a) + e)) for j, a, e in zip(JOINTS, q, extra)}
+
+    def _settle(self, q_target, goal=None, s_dir=None, tol=3, max_comp=90, timeout=1.2):
+        """Make the joints really arrive (soft servos stop 30-40 counts short, 20 Oct). Watches the
+        positions every 10 ms (a read of all six takes 1 ms) instead of fixed 0.25 s waits: done the
+        moment every joint is within `tol` counts; a joint that has STOPPED short (no change for 40 ms)
+        gets its goal nudged by part of the error. What finally worked is learnt (SagModel)."""
         want = {j: self.to_raw(j, a) for j, a in zip(JOINTS, q_target)}
-        goal = dict(want)
-        for _ in range(rounds):
-            time.sleep(0.25)
+        goal = dict(goal or want)
+        t0, prev, still, nudges = time.time(), None, 0, 0
+        arrived = False
+        while time.time() - t0 < timeout:
+            time.sleep(0.01)
             pos = self.bus.sync_read("Present_Position", normalize=False)
             err = {j: want[j] - pos[j] for j in want}
             if max(abs(e) for e in err.values()) <= tol:
-                return
-            for j, e in err.items():
-                goal[j] = int(np.clip(goal[j] + 0.8 * e, want[j] - max_comp, want[j] + max_comp))
-            self.bus.sync_write("Goal_Position", goal, normalize=False)
+                arrived = True
+                break
+            moving = prev is None or max(abs(pos[j] - prev[j]) for j in want) > 1
+            prev = pos
+            still = 0 if moving else still + 1
+            if still >= 4:
+                for j, e in err.items():
+                    goal[j] = int(np.clip(goal[j] + 0.6 * e, want[j] - max_comp, want[j] + max_comp))
+                self.bus.sync_write("Goal_Position", goal, normalize=False)
+                still, nudges = 0, nudges + 1
+        self.settle_log.append((time.time() - t0, nudges, arrived))
+        if arrived and s_dir is not None:
+            self.sag.learn(q_target, s_dir, np.array([goal[j] - want[j] for j in JOINTS], float))
+        return arrived
 
     def level_roll(self):
         """Wrist roll with the jaws level: raw 2048 = the calibration middle pose."""
@@ -218,6 +306,59 @@ class Arm:
             raise MotionError(f"cannot reach {np.round(xyz, 3)} pointing down (closest {err * 1000:.0f} mm away)")
         self.move_joints(q, duration, settle=settle)
         return q
+
+    def move_line(self, xyz, speed=0.05, tilt=0.0, roll=None, watch=None, settle=True, step=0.005):
+        """Tip in a STRAIGHT line to xyz, pointing down, as ONE smooth movement (no stops on the way;
+        minimum-jerk, so it starts and lands softly). `speed` = top tip speed (m/s). IK is solved every
+        `step` metres before moving (~10 ms each), then streamed at 50 Hz. While moving,
+        watch(progress 0-1, q_commanded, q_measured) is called each tick (a position read takes 1 ms);
+        returning True stops the arm where it is. Returns True when it arrived, False when stopped."""
+        roll = self.level_roll() if roll is None else roll
+        q0 = self.joints()
+        p0, p1 = self.kin.fk(q0)[:3, 3], np.asarray(xyz, float)
+        n = max(1, int(np.ceil(np.linalg.norm(p1 - p0) / step)))
+        qs, seed = [q0], q0.copy()
+        seed[4] = roll
+        for i in range(1, n + 1):
+            p = p0 + (p1 - p0) * i / n
+            q, err = self.kin.ik_down(p, seed, tilt=tilt)
+            if err > 0.003:
+                raise MotionError(f"straight line: cannot reach {np.round(p, 3)} pointing down "
+                                  f"({err * 1000:.0f} mm off)")
+            self._check_target(q)
+            qs.append(q)
+            seed = q
+        qs = np.array(qs)
+        for a, b in zip(qs[:-1], qs[1:]):
+            self._check_path(a, b, steps=3)
+        span = float(np.max(np.abs(np.diff(qs, axis=0)).sum(0)))      # each joint's total travel
+        dist = float(np.linalg.norm(p1 - p0))
+        duration = max(1.875 * dist / speed, 1.875 * span / self.max_speed, 0.3)   # 1.875: min-jerk peak
+        if self.dry_run:
+            print(f"  [dry run] line {np.round(p0, 3)} -> {np.round(p1, 3)} in {duration:.1f}s ({n} IK points)")
+            return True
+        q_end = qs[-1]
+        s_dir = self._approach(q0, q_end)
+        pred = self.sag.predict(q_end, s_dir) if settle else np.zeros(len(JOINTS))
+        t0 = time.time()
+        while True:
+            s = min((time.time() - t0) / duration, 1.0)
+            k = 10 * s**3 - 15 * s**4 + 6 * s**5
+            u = k * n
+            i = min(int(u), n - 1)
+            q = qs[i] + (u - i) * (qs[i + 1] - qs[i])
+            self.bus.sync_write("Goal_Position", self._goal(q, k * pred), normalize=False)
+            if watch is not None and watch(k, q, self.joints()):
+                now = self.bus.sync_read("Present_Position", normalize=False)
+                self.bus.sync_write("Goal_Position", {j: now[j] for j in JOINTS}, normalize=False)
+                return False
+            if s >= 1.0:
+                break
+            time.sleep(0.02)
+        if settle:
+            self._settle(q_end, self._goal(q_end, pred), s_dir)
+        self._check_servos()
+        return True
 
     def gripper(self, open: bool, wait=0.6):
         c = self.cal["gripper"]
