@@ -3,3 +3,4 @@
 - [Record and review](record-and-review.md) — every camera/hardware run is recorded (~/iro-runs, iro review); review recordings before guessing
 - [ARC LLM](arc-llm.md) — offline LLM 'ARC': models, offline Wikipedia, skills/grammar design, open items
 - [ARC straightforward](arc-straightforward.md) — owner wants short direct answers, no yapping, in every mood
+- [Arm motion tuning](arm-motion-tuning.md) — 15 Nov speed-ups: polling settle, sag model, move_line, P 24, 1.5 rad/s (measured)
