@@ -525,17 +525,19 @@ def cmd_calibrate(name):
         eye.close()
 
 
-def centre2(arm, eye, xy, roll, Jg, target, c, tries=6):
+def centre2(arm, eye, xy, roll, Jg, target, c, tries=6, scale=1.0, keep=None):
     """Centre the object on the target pixel with the stored camera model: usually ONE step.
     J = scale * Jg @ rot(-heading). The scale starts at 1 and is corrected from what each step really
     did (a taller object is nearer the camera and moves more px per metre), within 0.5-2x.
     Returns (xy, frame, box, c)."""
-    scale = 1.0
     f = box = None
     for k in range(tries):
         err = c - target
         if np.linalg.norm(err) < SERVO_TOL_PX and box is not None:
+            if keep is not None:
+                keep["scale"] = scale
             return xy, f, box, c
+        t_step = time.time()
         J = scale * Jg @ rot(-heading(arm))
         step = np.clip(-np.linalg.solve(J, err), -0.04, 0.04) if np.linalg.norm(err) >= SERVO_TOL_PX else np.zeros(2)
         if np.any(step):
@@ -549,7 +551,7 @@ def centre2(arm, eye, xy, roll, Jg, target, c, tries=6):
         if np.linalg.norm(pred) > 20:
             scale = float(np.clip(scale * (moved @ pred) / (pred @ pred), 0.5, 2.0))
         eye.r.log("centre", step=k, err_px=float(np.linalg.norm(err)), x=float(xy[0]), y=float(xy[1]),
-                  after_px=float(np.linalg.norm(c2 - target)), scale=scale)
+                  after_px=float(np.linalg.norm(c2 - target)), scale=scale, step_s=time.time() - t_step)
         c = c2
     raise RuntimeError(f"could not centre it in {tries} steps")
 
@@ -640,38 +642,44 @@ CAREFUL_V = 0.04     # m/s top speed near it; minimum-jerk slows to 0 at the end
 def descend(arm, xy, roll, h_to, r, top_m=0.08, block_mm=8, tilt=0.0):
     """Down to h_to as two SMOOTH straight-line moves (arm.move_line), no stops on the way.
     FAST while the jaws are higher than the object could possibly be (top_m + 2 cm: nothing to touch);
-    CAREFUL below that, watched ~50x a second: if the tip falls behind its command by more than
-    block_mm beyond its normal lag (measured over the first part, still above the object), a jaw has
-    landed on something (22 Oct: a standing tape was knocked over): it stops and backs up 3 cm.
-    15 Nov: 1 cm steps took 22.5 s, stepped at 2 speeds 13 s. Returns True when it reached h_to."""
-    from iro.pick import pick_config
-    table = pick_config()["table_z"]
+    CAREFUL below that, watched ~50x a second for a jaw landing on something (22 Oct: a standing
+    tape was knocked over): BLOCKED = the tip has STOPPED going down while its command keeps going
+    down (over the last 0.25 s the command fell >= 6 mm, the tip < 1.5 mm), or the tip ends more than
+    block_mm above where it was sent. Then it backs up 3 cm.
+    Not "the tip is more than X behind its command": near full stretch (33 cm out, leaning) the
+    joints lag 8 mm behind in free air and that rule stopped two good picks (15 Nov).
+    15 Nov: 1 cm steps took 22.5 s, stepped at 2 speeds 13 s, this ~5 s. Returns True when it reached h_to."""
+    table = pick_table()
     careful_from = h_to + top_m + 0.02
     t0 = time.time()
     if arm.tip()[2] - table > careful_from + 0.005:
         arm.move_line([xy[0], xy[1], table + careful_from], speed=FAST_V, tilt=tilt, roll=roll, settle=False)
     t1 = time.time()
-    above = table + h_to + top_m + 0.005             # commanded heights above this cannot touch it
-    lag, worst = [], [0.0]
+    hist, worst = [], [0.0]
 
     def watch(k, q_cmd, q_now):
         z_cmd, z_now = arm.kin.fk(q_cmd)[2, 3], arm.kin.fk(q_now)[2, 3]
-        e = z_now - z_cmd                               # > 0: the tip is higher than it was sent
-        if z_cmd > above:
-            lag.append(e)
+        now = time.time()
+        hist.append((now, z_cmd, z_now))
+        worst[0] = max(worst[0], z_now - z_cmd)
+        while len(hist) > 2 and now - hist[1][0] >= 0.25:
+            hist.pop(0)
+        if now - hist[0][0] < 0.22:
             return False
-        base = max(lag) if lag else 0.003
-        worst[0] = max(worst[0], e - base)
-        return e - base > block_mm / 1000
+        # ... and it must be ABOVE its command: a tip hanging a little below it (gravity, far out)
+        # waits for the command to catch up at the start, which is no blockage (15 Nov, free air)
+        return hist[0][1] - z_cmd >= 0.006 and hist[0][2] - z_now < 0.0015 and z_now - z_cmd > 0.005
 
     reached = arm.move_line([xy[0], xy[1], table + h_to], speed=CAREFUL_V, tilt=tilt, roll=roll, watch=watch)
+    got = arm.tip()[2] - table
+    if reached and got - h_to > block_mm / 1000:
+        reached = False
     if not reached:
-        got = arm.tip()[2] - table
-        r.note(f"blocked at {got * 100:.1f} cm (tip {worst[0] * 1000:.0f} mm behind beyond its usual lag)")
+        r.note(f"blocked at {got * 100:.1f} cm (the tip stopped going down; it was {worst[0] * 1000:.0f} mm behind at most)")
         look(arm, xy, roll, h=got + 0.03, duration=0.8, tilt=tilt)
         return False
     r.note(f"down in {time.time() - t0:.1f} s (fast {t1 - t0:.1f} s, careful below {careful_from * 100:.1f} cm; "
-           f"lag {max(lag) * 1000 if lag else 0:.0f} mm, worst extra {worst[0] * 1000:.0f} mm)")
+           f"the tip was {worst[0] * 1000:.0f} mm behind at most)")
     return True
 
 
@@ -747,6 +755,12 @@ def cmd_pick(name, drop=False, attempts=3):
     th = threading.Thread(target=open_scout, daemon=True)
     th.start()
     eye = DownEye(name, r)
+    try:                                           # first use of each model is slow (0.7 s + 1-2 s): do it now
+        f0 = eye.frame()
+        eye.pm.locate(f0)
+        eye.sam.sam(f0, verbose=False, bboxes=[[200.0, 150.0, 440.0, 330.0]])
+    except Exception:                              # noqa: BLE001 - only a warm-up
+        pass
     th.join(timeout=25)
     scout, model = box_.get("scout"), wrist_model()
     if scout is None:
@@ -797,7 +811,9 @@ def cmd_pick(name, drop=False, attempts=3):
                     print(f"{'' if attempt == 1 else f'[try {attempt}] '}1. the OAK-D found it at {P[0] * 100:.0f}, "
                           f"{P[1] * 100:+.0f} cm; wrist camera confirms (match {peak:.2f}, {np.linalg.norm(c - target):.0f} px from the mark)")
                     r.note(f"aim: {np.linalg.norm(c - target):.0f} px from the grasp pixel at first sight")
-                    xy, f, box, c = centre2(arm, eye, xy, roll, model[0], target, c)
+                    kept = {}
+                    xy, f, box, c = centre2(arm, eye, xy, roll, model[0], target, c, scale=G.get("centre_scale", 1.0), keep=kept)
+                    r.note(f"centred to {np.linalg.norm(c - target):.0f} px")
                     eye.show(f, "2. centred", box, target, tag + "2_centred")
                     log_pose(arm, r, "centred", attempt=attempt)
                     P0 = xy - rot(heading(arm)) @ off
@@ -912,13 +928,9 @@ def cmd_pick(name, drop=False, attempts=3):
                 log_pose(arm, r, "over", attempt=attempt, grasp_xy=np.round(gxy, 4).tolist())
                 reached = descend(arm, gxy, roll, G["grasp_h_m"], r, top_m=tallest_m(name), tilt=tilt)
                 side.stage = f"{attempt}: closing" if reached else f"{attempt}: blocked"
-                grip = None
-                if reached:
-                    # quickly to 12 mm wider than it is, then feel for the contact from there (the
-                    # contact detector needs ~8 free readings first: 12 mm is ~7 steps of 2 %)
-                    pre = min(open_pct, pct_for(w + 12))
-                    set_gripper(arm, pre, wait=0.5)
-                    grip = close_on(arm, pre, r, hold=True)
+                # closing starts from fully open: the contact detector needs ~8 free readings before
+                # the touch (15 Nov: started 12 mm from the object it missed a real grip)
+                grip = close_on(arm, open_pct, r, hold=True) if reached else None
                 log_pose(arm, r, "closed" if grip else ("blocked" if not reached else "missed"), attempt=attempt)
                 if grip is None:
                     set_gripper(arm, open_pct)
@@ -967,9 +979,20 @@ def cmd_pick(name, drop=False, attempts=3):
                 print(f"6. Holding the {name}, 10 cm up (try {attempt}).")
                 if scout is not None:
                     try:
-                        left = [q for q in scout.objects(2) if np.linalg.norm(q["centre"] - gxy) < 0.06 and q["height"] > 0.015]
+                        left = [q for q in scout.objects(2) if np.linalg.norm(q["centre"] - gxy) < 0.06
+                                and q["height"] > 0.015 and q["bottom"] < 0.035]     # hanging in the jaws: bottom ~9 cm
                         r.note("OAK-D: the floor is empty where it stood" if not left else
-                               f"OAK-D: something still stands there ({left[0]['height'] * 100:.1f} cm tall)")
+                               f"OAK-D: something still stands on the floor there ({left[0]['height'] * 100:.1f} cm tall)")
+                        if o is not None and not left:
+                            # this pick's pair for the scout's self-correction: where the scout (uncorrected)
+                            # had it, and where it really was
+                            raw = o["front_raw"] + scout.corr.rot().T @ o.get("shift", np.zeros(2)) if o.get("completed") else o["centre_raw"]
+                            if kept.get("scale") and abs(kept["scale"] - G.get("centre_scale", 1.0)) > 0.03:
+                                G["centre_scale"] = round(0.5 * G.get("centre_scale", kept["scale"]) + 0.5 * kept["scale"], 3)
+                                gf.write_text(yaml.safe_dump(G))
+                            if scout.corr.add(raw, gxy, name):
+                                r.note(f"scout pair saved ({len(scout.corr.pairs)} so far; they now fit to "
+                                       f"{scout.corr.residual_mm():.0f} mm)")
                     except Exception:                      # noqa: BLE001 - a bonus check
                         pass
                 r.note(f"whole pick: {time.time() - t_start:.1f} s")

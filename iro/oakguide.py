@@ -23,10 +23,87 @@ import cv2
 import numpy as np
 import yaml
 
+from iro import ROOT
+
 CELL = 0.004               # m, top-down grid
 MIN_H = 0.010              # m above the floor to count as part of an object
 REGION = (0.14, 0.50, -0.30, 0.30)     # x0, x1, y0, y1 (m, arm frame): where the arm could ever pick
 LENS_H = 0.115             # m above the floor
+
+
+PAIRS = ROOT / "config" / "scout_pairs.yaml"
+
+
+class Correction:
+    """The scout's positions corrected by what the picks themselves found. Every successful
+    scout-guided pick gives a pair: where the scout said the object was, and where the wrist camera
+    and the grip then really found it. A rigid shift + turn fitted to the pairs (turn only once the
+    pairs are spread over >= 8 cm; at most 12 deg) is applied to all later scout positions.
+    15 Nov: the OAK-D had been 9 mm exact when calibrated (21 Oct), but after the move to the Orin NX
+    it was 3-4.5 cm off, as a ~7 deg turn: the mount had shifted. Three picks' pairs remove most of
+    it without a new calibration. A new `iro efad calibrate` empties the list (its date is stored)."""
+
+    def __init__(self):
+        self.theta, self.t, self.c, self.n = 0.0, np.zeros(2), np.zeros(2), 0
+        self.load()
+
+    @staticmethod
+    def _cal_date():
+        from iro.efad import CALIB
+        try:
+            return str(yaml.safe_load(CALIB.read_text()).get("date"))
+        except (OSError, AttributeError):
+            return None
+
+    def load(self):
+        self.pairs = []
+        if PAIRS.exists():
+            d = yaml.safe_load(PAIRS.read_text()) or {}
+            if d.get("calibration_date") == self._cal_date():
+                self.pairs = [p for p in d.get("pairs", [])][-40:]
+        self.fit()
+
+    def fit(self):
+        self.theta, self.t, self.c, self.n = 0.0, np.zeros(2), np.zeros(2), len(self.pairs)
+        if not self.pairs:
+            return
+        A = np.array([p["scout"] for p in self.pairs], float)
+        B = np.array([p["arm"] for p in self.pairs], float)
+        ca, cb = A.mean(0), B.mean(0)
+        if len(A) >= 3 and np.linalg.norm(A - ca, axis=1).max() > 0.04:
+            H = (A - ca).T @ (B - cb)
+            self.theta = float(np.clip(np.arctan2(H[0, 1] - H[1, 0], H[0, 0] + H[1, 1]), -0.21, 0.21))
+        self.c, self.t = ca, cb - ca
+
+    def rot(self):
+        c, s_ = np.cos(self.theta), np.sin(self.theta)
+        return np.array([[c, -s_], [s_, c]])
+
+    def point(self, p):
+        return self.rot() @ (np.asarray(p, float) - self.c) + self.c + self.t
+
+    def direction(self, v):
+        return self.rot() @ np.asarray(v, float)
+
+    def add(self, scout_xy, arm_xy, name=""):
+        """Remember one pick's pair (raw scout position, where it really was) and refit."""
+        import time
+        d = np.linalg.norm(np.asarray(scout_xy) - np.asarray(arm_xy))
+        if d > 0.08:                                   # not a calibration error any more: do not learn it
+            return False
+        self.pairs.append({"scout": [round(float(v), 4) for v in scout_xy], "arm": [round(float(v), 4) for v in arm_xy],
+                           "object": name, "date": time.strftime("%Y-%m-%d %H:%M")})
+        self.pairs = self.pairs[-40:]
+        self.fit()
+        PAIRS.write_text("# Written by iro pick: where the OAK-D scout said an object was vs where the pick found it\n"
+                         "# (iro.oakguide.Correction). Emptied by a new `iro efad calibrate`.\n"
+                         + yaml.safe_dump({"calibration_date": self._cal_date(), "pairs": self.pairs}))
+        return True
+
+    def residual_mm(self):
+        if not self.pairs:
+            return None
+        return float(np.median([np.linalg.norm(self.point(p["scout"]) - p["arm"]) for p in self.pairs]) * 1000)
 
 
 class Scout:
@@ -39,6 +116,7 @@ class Scout:
         self.oak, self.T, self.table = oak, load_calib(), pick_config()["table_z"]
         if self.T is None:
             raise RuntimeError("the OAK-D is not calibrated to the arm yet: iro efad calibrate")
+        self.corr = Correction()
         self.lock = threading.Lock()               # the side-view recorder reads the same camera
         self.last = None                           # (colour picture, objects) of the last look
 
@@ -103,10 +181,16 @@ class Scout:
                 al, ac = (pts - cam) @ ev_, (pts - cam) @ ep_
                 near, far = np.percentile(al, 2), np.percentile(al, 98)
                 a0, a1 = np.percentile(ac, 2), np.percentile(ac, 98)
-                out.append({"centre": np.array([cx, cy]), "yaw": float((yaw + np.pi / 2) % np.pi - np.pi / 2),
+                yaw += self.corr.theta
+                raw_c = np.array([cx, cy])
+                front_raw = cam + near * ev_ + (a0 + a1) / 2 * ep_
+                ev_ = self.corr.direction(ev_)
+                out.append({"centre": self.corr.point(raw_c), "centre_raw": raw_c, "front_raw": front_raw,
+                            "yaw": float((yaw + np.pi / 2) % np.pi - np.pi / 2),
                             "length": float(max(a, b)), "width": float(min(a, b)), "height": height,
                             "front_only": bool(height > LENS_H - 0.01), "points": int(m.sum()),
-                            "view": ev_, "front": cam + near * ev_ + (a0 + a1) / 2 * ep_,
+                            "bottom": float(np.percentile(hi[m], 3)),       # > ~4 cm: held in the air
+                            "view": ev_, "front": self.corr.point(front_raw),
                             "across": float(a1 - a0), "along_seen": float(far - near),
                             "box": [int(ui[m].min()), int(vi[m].min()), int(ui[m].max()), int(vi[m].max())]})
         out.sort(key=lambda o: -o["points"])
@@ -165,6 +249,7 @@ def complete(o, sizes):
     o = dict(o)
     ev = o["view"]
     o["centre"] = o["front"] + ev * along / 2
+    o["shift"] = ev * along / 2                 # from the seen front face to the true centre
     o["length"], o["width"] = max(across, along), min(across, along)
     long_dir = ev if along >= across else np.array([-ev[1], ev[0]])
     o["yaw"] = float((np.arctan2(long_dir[1], long_dir[0]) + np.pi / 2) % np.pi - np.pi / 2)
