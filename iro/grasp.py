@@ -31,6 +31,8 @@ import cv2
 import numpy as np
 import yaml
 
+from iro import ROOT
+
 LOOK_H = 0.15              # m above the floor for looking down
 GRASP_H = 0.012            # m above the floor where the fingertips close (half a lying tape)
 SERVO_TOL_PX = 8           # outline centre; the arm itself repeats to ~3 mm (~6 px)
@@ -119,7 +121,7 @@ class DownEye:
         """Centre of the object's outline (sub-pixel), or None. The matcher's box moves in ~10 px
         jumps (its patch grid): centring on it never settled within 6 px (22 Oct)."""
         out = self.outline(f, box)
-        return None if out is None else out[2].mean(0)
+        return None if out is None else core_centre(out[0])
 
     @staticmethod
     def extent(pts, axis_deg):
@@ -413,6 +415,140 @@ def cmd_teach(name):
 
 
 # ------------------------------------------------------------------ pick
+
+def core_centre(mask):
+    """Centre of the THICK part of an outline: the pixels deeper inside than half the deepest one.
+    A strap, a handle or a cut-off corner moves the plain average of the outline; not this."""
+    d = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+    ys, xs = np.nonzero(d > 0.5 * d.max())
+    return np.array([xs.mean(), ys.mean()])
+
+
+WRIST = ROOT / "config" / "wrist_camera.yaml"
+
+
+def wrist_model():
+    """(Jg, Mz) measured by `iro pick calibrate`, or None. Jg (2x2): how far (px) the object moves in
+    the wrist picture per metre the gripper moves, in the GRIPPER's own frame at the look pose, so it
+    holds for every look point and wrist roll: J in the arm frame = Jg @ rot(-heading). Mz (2): px per
+    metre the gripper rises. 15 Nov: measuring J before every centring from the floor's texture
+    (two test moves, ~2.5 s) gave rubbish on a plain wooden floor (7 tries, entries differing 3x and
+    in sign); measured once on the object it fits to ~5 px."""
+    if not WRIST.exists():
+        return None
+    d = yaml.safe_load(WRIST.read_text())
+    return np.array(d["Jg"]), np.array(d["Mz"])
+
+
+def see(arm, eye, near=None, radius=None):
+    """The object in a picture taken with the arm standing still: (frame, box, centre, peak), the
+    centre being the outline's thick core. The wrist camera looks at a slant: a picture taken while
+    the joints still creep (up to 0.4 s after a move) is up to 100 px off (15 Nov)."""
+    arm.wait_still()
+    f, box, c, peak = eye.find(near=near, radius=radius)
+    if box is None and near is not None:
+        f, box, c, peak = eye.find()
+    if box is not None:
+        pc = eye.precise_centre(f, box)
+        c = pc if pc is not None else c
+    return f, box, c, peak
+
+
+def cmd_calibrate(name):
+    """iro pick calibrate NAME: measure the wrist camera's motion model on an object lying still in
+    front of the robot (found by the OAK-D). 10 small moves, ~20 s. Saves config/wrist_camera.yaml."""
+    from iro.motion import Arm
+    from iro.oakguide import Scout
+    from iro.record import run
+    gf = grasp_file(name)
+    if not gf.exists():
+        print(f"Teach the grasp first: iro pick teach {name}")
+        return 1
+    G = yaml.safe_load(gf.read_text())
+    off = np.array(G["look_offset_gripper_m"])
+    scout = Scout()
+    o = scout.find(name)
+    scout.close()
+    if o is None:
+        print(f"The OAK-D does not see the {name} on the floor (18-45 cm in front of the arm).")
+        return 1
+    r = run(f"pick-calibrate-{name}")
+    eye = DownEye(name, r)
+    eye.min_peak = 0.5 * G.get("top_peak", 0) or None
+    try:
+        with Arm() as arm:
+            roll = arm.level_roll()
+            xy0 = orbit_xy(arm, o["centre"], roll, off)
+            look(arm, xy0, roll)
+            f, box, c0, _ = see(arm, eye)
+            if box is None:
+                print(f"The wrist camera does not see the {name} from above it.")
+                return 1
+            hd = heading(arm)
+            # bring it near the picture's middle first: the fit is best away from the edges
+            D, C = [], []
+            moves = [(0.012, 0, 0), (-0.012, 0, 0), (0, 0.012, 0), (0, -0.012, 0), (0.01, 0.01, 0), (-0.01, -0.01, 0),
+                     (0, 0, 0.02), (0, 0, -0.02), (0.01, -0.01, 0.01), (0, 0, 0)]
+            for dx, dy, dz in moves:
+                d = rot(hd) @ np.array([dx, dy])                       # gripper frame -> arm frame
+                look(arm, xy0 + d, roll, h=LOOK_H + dz)
+                f, box, c, _ = see(arm, eye, near=c0, radius=250)
+                if box is None:
+                    continue
+                D.append([dx, dy, dz])
+                C.append(c - c0)
+            look(arm, xy0, roll)
+        D, C = np.array(D), np.array(C)
+        if len(D) < 7:
+            print(f"Only {len(D)} of {len(moves)} sightings: not enough. Is the {name} well inside the picture?")
+            return 1
+        M = np.linalg.lstsq(np.c_[D, np.ones(len(D))], C, rcond=None)[0][:3].T          # 2x3
+        e = np.linalg.norm(np.c_[D, np.ones(len(D))] @ np.linalg.lstsq(np.c_[D, np.ones(len(D))], C, rcond=None)[0] - C, axis=1)
+        data = {"Jg": np.round(M[:, :2], 1).tolist(), "Mz": np.round(M[:, 2], 1).tolist(), "look_h_m": LOOK_H,
+                "object": name, "object_height_m": round(float(o["height"]), 3), "fit_px_median": round(float(np.median(e)), 1),
+                "fit_px_worst": round(float(e.max()), 1), "sightings": len(D), "recording": str(r.dir),
+                "date": time.strftime("%Y-%m-%d %H:%M")}
+        r.note(f"wrist camera model: {data}")
+        if np.median(e) > 12:
+            print(f"The fit is poor (median {np.median(e):.0f} px): not saved. Was the {name} moved, or near the picture's edge?")
+            return 1
+        WRIST.write_text("# Written by `iro pick calibrate`: how the wrist picture moves with the gripper (see grasp.wrist_model)\n"
+                         + yaml.safe_dump(data))
+        print(f"Saved {WRIST.name}: sideways {np.abs(M[:, :2]).max():.0f} px/m, up/down {np.linalg.norm(M[:, 2]):.0f} px/m; "
+              f"fit {np.median(e):.1f} px (worst {e.max():.1f}).")
+        return 0
+    finally:
+        eye.close()
+
+
+def centre2(arm, eye, xy, roll, Jg, target, c, tries=6):
+    """Centre the object on the target pixel with the stored camera model: usually ONE step.
+    J = scale * Jg @ rot(-heading). The scale starts at 1 and is corrected from what each step really
+    did (a taller object is nearer the camera and moves more px per metre), within 0.5-2x.
+    Returns (xy, frame, box, c)."""
+    scale = 1.0
+    f = box = None
+    for k in range(tries):
+        err = c - target
+        if np.linalg.norm(err) < SERVO_TOL_PX and box is not None:
+            return xy, f, box, c
+        J = scale * Jg @ rot(-heading(arm))
+        step = np.clip(-np.linalg.solve(J, err), -0.04, 0.04) if np.linalg.norm(err) >= SERVO_TOL_PX else np.zeros(2)
+        if np.any(step):
+            xy = xy + step
+            look(arm, xy, roll)
+        expect = c + J @ step
+        f, box, c2, _ = see(arm, eye, near=expect, radius=150)
+        if box is None:
+            raise RuntimeError("lost the object while centring")
+        moved, pred = c2 - c, J @ step
+        if np.linalg.norm(pred) > 20:
+            scale = float(np.clip(scale * (moved @ pred) / (pred @ pred), 0.5, 2.0))
+        eye.r.log("centre", step=k, err_px=float(np.linalg.norm(err)), x=float(xy[0]), y=float(xy[1]),
+                  after_px=float(np.linalg.norm(c2 - target)), scale=scale)
+        c = c2
+    raise RuntimeError(f"could not centre it in {tries} steps")
+
 
 def centre(arm, eye, xy, roll, J, target, c, tries=15):
     """Step sideways until the object's OUTLINE centre sits on the target pixel. (xy, frame, box, c)."""
@@ -729,6 +865,11 @@ def main():
     a = sys.argv[1:]
     if len(a) >= 2 and a[0] == "teach":
         return cmd_teach(a[1])
+    if len(a) >= 2 and a[0] == "calibrate":
+        return cmd_calibrate(a[1])
+    if a and a[0] == "scout":
+        from iro.oakguide import cmd_scout
+        return cmd_scout()
     if a and not a[0].startswith("-"):
         return cmd_pick(a[0], drop="--drop" in a)
     print(__doc__)

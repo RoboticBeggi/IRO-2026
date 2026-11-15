@@ -1,0 +1,17 @@
+# Written by `iro pick calibrate`: how the wrist picture moves with the gripper (see grasp.wrist_model)
+Jg:
+- - -4941.4
+  - -789.3
+- - -451.7
+  - 2107.1
+Mz:
+- -6.0
+- 1092.8
+date: 2026-11-15 15:29
+fit_px_median: 4.5
+fit_px_worst: 8.7
+look_h_m: 0.15
+object: Tape
+object_height_m: 0.07
+recording: /home/orin_nx/iro-runs/20261115-152845_pick-calibrate-Tape
+sightings: 9

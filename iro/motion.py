@@ -163,6 +163,21 @@ class Arm:
             self.sag.save()
         self._cm.__exit__(*exc)  # torque stays on: the arm holds its pose (and anything it carries)
 
+    def wait_still(self, timeout=0.8, quiet=0.08):
+        """Wait until no joint has changed by more than 1 count for `quiet` seconds (before taking a
+        picture: the wrist camera looks at a slant, 1 degree of wrist pitch is ~25 px). Returns the
+        seconds waited."""
+        t0 = time.time()
+        last, since = self.bus.sync_read("Present_Position", normalize=False), time.time()
+        while time.time() - t0 < timeout:
+            time.sleep(0.01)
+            pos = self.bus.sync_read("Present_Position", normalize=False)
+            if max(abs(pos[j] - last[j]) for j in JOINTS) > 1:
+                last, since = pos, time.time()
+            elif time.time() - since >= quiet:
+                break
+        return time.time() - t0
+
     def joints(self) -> np.ndarray:
         raw = self.bus.sync_read("Present_Position", normalize=False)
         return np.array([self.to_rad(j, raw[j]) for j in JOINTS])
@@ -266,13 +281,16 @@ class Arm:
             time.sleep(0.01)
             pos = self.bus.sync_read("Present_Position", normalize=False)
             err = {j: want[j] - pos[j] for j in want}
-            if max(abs(e) for e in err.values()) <= tol:
-                arrived = True
-                break
             moving = prev is None or max(abs(pos[j] - prev[j]) for j in want) > 1
             prev = pos
             still = 0 if moving else still + 1
-            if still >= 4:
+            # arrived = in tolerance AND standing still for 3 reads (~35 ms). 15 Nov: "in tolerance"
+            # alone returned while the joints were still creeping (up to 8 counts for 0.4 s): pictures
+            # taken right after were up to 100 px off, and centring wandered.
+            if max(abs(e) for e in err.values()) <= tol and still >= 3:
+                arrived = True
+                break
+            if still >= 4 and max(abs(e) for e in err.values()) > tol:
                 for j, e in err.items():
                     if abs(e) > tol:                    # leave arrived joints alone (15 Nov: nudging all
                         #                                 of them made 2 of 14 moves hunt, 12-13 nudges)
