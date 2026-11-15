@@ -72,10 +72,26 @@ class DownEye:
         from iro.lockon import fresh
         return fresh(self.cam)
 
-    def find(self, near=None, radius=None, tries=3):
+    def still_frame(self, max_wait=0.7, tol=1.5):
+        """A frame taken when the PICTURE has stopped moving: two frames in a row less than `tol` px
+        apart (phase correlation). The joint encoders say "still" while the arm's plastic links and
+        the camera on the wrist still wobble after a quick move: a picture taken then was 28 px off
+        with all joints within 3 counts (15 Nov)."""
+        from iro.lockon import gray_small, picture_shift
+        a = self.frame()
+        ga, t0 = gray_small(a), time.time()
+        while time.time() - t0 < max_wait:
+            b = self.cam.latest()
+            gb = gray_small(b)
+            if np.linalg.norm(picture_shift(ga, gb, b.shape[1])[0]) < tol:
+                return b
+            a, ga = b, gb
+        return a
+
+    def find(self, near=None, radius=None, tries=3, still=False):
         """(frame, box, centre, peak) of the object, or (frame, None, None, 0)."""
-        for _ in range(tries):
-            f = self.frame()
+        for k in range(tries):
+            f = self.still_frame() if still and k == 0 else self.frame()
             got = self.pm.locate(f, near=near, radius=radius, min_peak=self.min_peak)
             if got is not None:
                 box, _, peak = got
@@ -454,7 +470,7 @@ def see(arm, eye, near=None, radius=None):
     centre being the outline's thick core. The wrist camera looks at a slant: a picture taken while
     the joints still creep (up to 0.4 s after a move) is up to 100 px off (15 Nov)."""
     arm.wait_still()
-    f, box, c, peak = eye.find(near=near, radius=radius)
+    f, box, c, peak = eye.find(near=near, radius=radius, still=True)
     if box is None and near is not None:
         f, box, c, peak = eye.find()
     if box is not None:
@@ -759,6 +775,9 @@ def cmd_pick(name, drop=False, attempts=3, to=None):
 
     def open_scout():
         try:
+            import os
+            if os.environ.get("IRO_NO_SCOUT"):         # test the wrist-only search: IRO_NO_SCOUT=1 iro pick NAME
+                raise RuntimeError("switched off (IRO_NO_SCOUT)")
             from iro.oakguide import Scout
             box_["scout"] = Scout()
         except Exception as e:                     # noqa: BLE001 - without it: the old search from above
