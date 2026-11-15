@@ -143,10 +143,10 @@ class DownEye:
         self.cam.release()
 
 
-def look(arm, xy, roll, h=LOOK_H, duration=None, tilt=0.0):
+def look(arm, xy, roll, h=LOOK_H, duration=None, tilt=0.0, settle=True):
     from iro.pick import pick_config
     table = pick_config()["table_z"]
-    return arm.move_tip([xy[0], xy[1], table + h], roll=roll, duration=duration, tilt=tilt)
+    return arm.move_tip([xy[0], xy[1], table + h], roll=roll, duration=duration, tilt=tilt, settle=settle)
 
 
 OVER_H = (LOOK_H, 0.13, 0.11, 0.10)    # m: heights to come in over the object from (a standing tape is 7.6 cm)
@@ -442,20 +442,54 @@ def log_pose(arm, r, stage, **extra):
     r.log("poses", stage=stage, q_deg=np.round(np.degrees(q), 2).tolist(), tip_m=np.round(tip, 4).tolist(), **extra)
 
 
-def descend(arm, xy, roll, h_to, r, step=0.01, block_mm=8, tilt=0.0):
-    """Straight down in 1 cm steps, feeling for a blockage: if the tip stays more than block_mm
-    above where it was sent, a jaw has landed on something (22 Oct: a standing tape was knocked
-    over). Returns True when it reached h_to; False = blocked (it backs up 3 cm)."""
+def tallest_m(name, default=0.08):
+    """The object's largest side (objects/NAME/size.yaml): how high it can be if it stands up."""
+    from iro.objects import OBJ_DIR
+    f = OBJ_DIR / name / "size.yaml"
+    if not f.exists():
+        return default
+    d = yaml.safe_load(f.read_text()) or {}
+    sizes = [d.get("height_m"), d.get("length_m"), d.get("width_m")] + ((d.get("ruler") or {}).get("sizes_m") or [])
+    sizes = [v for v in sizes if isinstance(v, (int, float))]
+    return max(sizes) if sizes else default
+
+
+FAST_STEP, FAST_S = 0.03, 0.35          # above the object: 3 cm steps, no settling pause
+CAREFUL_STEP, NEAR_STEP = 0.015, 0.01   # near it: 1.5 cm steps, the last 3 cm in 1 cm steps
+LAND_S = 0.8                            # the very last step slowly: soft landing
+
+
+def descend(arm, xy, roll, h_to, r, top_m=0.08, block_mm=8, tilt=0.0):
+    """Down to h_to at two speeds. FAST while the jaws are higher than the object could possibly be
+    (top_m + 2 cm: nothing to touch there). CAREFUL below that: every step settles and feels for a
+    blockage: if the tip stays more than block_mm above where it was sent, a jaw has landed on
+    something (22 Oct: a standing tape was knocked over). The last step is slow (soft landing).
+    15 Nov: was 1 cm steps all the way (22.5 s from 15 cm). Returns True when it reached h_to;
+    False = blocked (it backs up 3 cm)."""
     from iro.pick import pick_config
     table = pick_config()["table_z"]
-    z_now = arm.tip()[2] - table
-    for h in np.arange(z_now - step, h_to - 1e-4, -step).tolist() + [h_to]:
-        look(arm, xy, roll, h=max(h, h_to), duration=0.4, tilt=tilt)
+    careful_from = h_to + top_m + 0.02
+    hs, h = [], arm.tip()[2] - table
+    while h - h_to > 1e-4:
+        if h > careful_from + 1e-4:
+            h = max(h - FAST_STEP, careful_from)
+        else:
+            h = h - (CAREFUL_STEP if h - h_to > 0.03 + 1e-4 else NEAR_STEP)
+            h = h_to if h - h_to < 0.005 else h        # no tiny last step: land directly
+        hs.append(h)
+    t0 = time.time()
+    for h in hs:
+        careful = h <= careful_from + 1e-4
+        duration = LAND_S if h == h_to else (0.4 if careful else FAST_S)
+        look(arm, xy, roll, h=h, duration=duration, tilt=tilt, settle=careful)
+        if not careful:
+            continue
         got = arm.tip()[2] - table
-        if got - max(h, h_to) > block_mm / 1000:
-            r.note(f"blocked at {got * 100:.1f} cm (sent {max(h, h_to) * 100:.1f} cm)")
+        if got - h > block_mm / 1000:
+            r.note(f"blocked at {got * 100:.1f} cm (sent {h * 100:.1f} cm)")
             look(arm, xy, roll, h=got + 0.03, duration=0.8, tilt=tilt)
             return False
+    r.note(f"down in {time.time() - t0:.1f} s ({len(hs)} steps, careful below {careful_from * 100:.1f} cm)")
     return True
 
 
@@ -598,7 +632,7 @@ def cmd_pick(name, drop=False, attempts=3):
                 side.stage = f"{attempt}: over it, going down (lean {np.degrees(-tilt):.0f})"
                 look(arm, gxy, roll, h=over_h, duration=1.5, tilt=tilt)
                 log_pose(arm, r, "over", attempt=attempt, grasp_xy=np.round(gxy, 4).tolist())
-                reached = descend(arm, gxy, roll, G["grasp_h_m"], r, tilt=tilt)
+                reached = descend(arm, gxy, roll, G["grasp_h_m"], r, top_m=tallest_m(name), tilt=tilt)
                 side.stage = f"{attempt}: closing" if reached else f"{attempt}: blocked"
                 grip = close_on(arm, open_pct, r, hold=True) if reached else None
                 log_pose(arm, r, "closed" if grip else ("blocked" if not reached else "missed"), attempt=attempt)

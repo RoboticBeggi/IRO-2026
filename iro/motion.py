@@ -145,7 +145,7 @@ class Arm:
                     raise MotionError(again[j])
 
     # --- moves ---------------------------------------------------------------
-    def move_joints(self, q_target, duration=None, floor_check=True):
+    def move_joints(self, q_target, duration=None, floor_check=True, settle=True):
         q_target = np.asarray(q_target, float)
         q0 = self.joints()
         self._check_target(q_target)
@@ -165,7 +165,8 @@ class Arm:
             if s >= 1.0:
                 break
             time.sleep(1 / rate)
-        self._settle(q_target)
+        if settle:                                     # off = keep moving (passing points)
+            self._settle(q_target)
         self._check_servos()
 
     def _settle(self, q_target, tol=3, max_comp=90, rounds=4):
@@ -199,7 +200,7 @@ class Arm:
         self.move_joints(pre, duration)
         self.move_joints(q, 0.5)
 
-    def move_tip(self, xyz, duration=None, tilt=0.0, roll=None):
+    def move_tip(self, xyz, duration=None, tilt=0.0, roll=None, settle=True):
         """Gripper tip to xyz (metres, base_link), pointing straight down. The wrist roll is
         held at `roll` (default: jaws level), so the gripper and camera never twist sideways."""
         roll = self.level_roll() if roll is None else roll
@@ -215,7 +216,7 @@ class Arm:
                     q, err = q2, err2
         if err > 0.005:
             raise MotionError(f"cannot reach {np.round(xyz, 3)} pointing down (closest {err * 1000:.0f} mm away)")
-        self.move_joints(q, duration)
+        self.move_joints(q, duration, settle=settle)
         return q
 
     def gripper(self, open: bool, wait=0.6):
