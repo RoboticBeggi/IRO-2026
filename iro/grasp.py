@@ -4,8 +4,13 @@ camera calibration).
     iro pick teach NAME      once per object: the arm lowers its open jaws to the floor, you slide
                              the object between them; it closes (contact detection), lets go, rises
                              straight up and remembers where the object then is in the picture
-    iro pick NAME            find it from above, centre it, turn the jaws across it, open just
-                             wide enough, descend, close until contact, lift   (--drop: put it back)
+    iro pick NAME            the OAK-D finds it on the floor, the arm goes straight above it with
+                             the jaws turned across it, the wrist camera fine-centres, down, close
+                             until contact, lift   (--drop: put it back;  --to=X,Y: carry it to that
+                             spot, cm from the arm base). No OAK-D: searches with the wrist camera.
+    iro pick calibrate NAME  once (or after the wrist camera was moved): how the wrist picture moves
+                             with the gripper, measured on NAME lying still (~20 s)
+    iro pick scout           what the OAK-D sees on the floor now
 
 Needs: `iro track teach NAME` (what it looks like) and `iro measure gripper` (jaw opening curve).
 How it works (calibration-free visual servoing, as `iro pick`):
@@ -625,18 +630,24 @@ def pick_table():
 
 
 def put_down(arm, xy, roll, grasp_h, open_pct, over_h, tilt=0.0):
-    """Set a held object down at floor point xy (straight down, soft), let go, rise."""
+    """Set a held object down at floor point xy (straight down, soft), let go, rise.
+    Gentle on purpose: all the way down to the height it was gripped at (let go 4 mm up, a tape
+    standing on its rim rocked and fell over, 15 Nov), jaws fully open and still before rising, and
+    the first 3 cm up slowly (the open jaws pass right beside it)."""
     from iro.measure import set_gripper
     table = pick_table()
     if np.linalg.norm(arm.tip()[:2] - xy) > 0.004:
         look(arm, xy, roll, h=max(0.10, arm.tip()[2] - table), tilt=tilt, settle=False)
-    arm.move_line([xy[0], xy[1], table + grasp_h + 0.004], speed=PLACE_V, tilt=tilt, roll=roll)
-    set_gripper(arm, open_pct, wait=0.6)
+    arm.move_line([xy[0], xy[1], table + grasp_h + 0.001], speed=PLACE_V, tilt=tilt, roll=roll)
+    time.sleep(0.15)                                     # let it stand still before letting go
+    set_gripper(arm, open_pct, wait=1.0)
+    time.sleep(0.2)
+    arm.move_line([xy[0], xy[1], table + grasp_h + 0.03], speed=0.03, tilt=tilt, roll=roll, settle=False)
     arm.move_line([xy[0], xy[1], table + over_h], speed=FAST_V, tilt=tilt, roll=roll, settle=False)
 
 
 FAST_V = 0.15        # m/s top tip speed above the object (free air)
-CAREFUL_V = 0.04     # m/s top speed near it; minimum-jerk slows to 0 at the end: soft landing
+CAREFUL_V = 0.06     # m/s top speed near it; minimum-jerk slows to 0 at the end: soft landing
 
 
 def descend(arm, xy, roll, h_to, r, top_m=0.08, block_mm=8, tilt=0.0):
@@ -727,7 +738,7 @@ def find_from(arm, eye, starts, roll):
     return None
 
 
-def cmd_pick(name, drop=False, attempts=3):
+def cmd_pick(name, drop=False, attempts=3, to=None):
     """Find, centre, turn, open, descend feeling for blockages, close until contact, lift, check.
     A miss is looked at again (did it move?) and retried, up to `attempts` times."""
     from iro.measure import close_on, max_open_m, pct_for, set_gripper
@@ -997,6 +1008,22 @@ def cmd_pick(name, drop=False, attempts=3):
                         pass
                 r.note(f"whole pick: {time.time() - t_start:.1f} s")
                 r.note(f"picked on try {attempt}: width {grip['width_mm']:.1f} mm at ({gxy[0]:.3f}, {gxy[1]:.3f})")
+                if to is not None:
+                    dest = np.asarray(to, float)
+                    plan2 = plan_reach(arm, dest, roll, G["grasp_h_m"])
+                    if plan2 is None:
+                        print(f"   Cannot place it at {dest[0] * 100:.0f}, {dest[1] * 100:+.0f} cm: out of reach. Putting it back.")
+                        r.note(f"place target out of reach {np.round(dest, 3).tolist()}")
+                        drop = True
+                    else:
+                        side.stage = f"{attempt}: carrying it"
+                        over2, tilt2 = plan2
+                        t_c = time.time()
+                        look(arm, dest, roll, h=0.10, tilt=tilt2, settle=False)          # carried 10 cm up
+                        put_down(arm, dest, roll, G["grasp_h_m"], open_pct, over2, tilt2)
+                        r.note(f"placed at ({dest[0]:.3f}, {dest[1]:.3f}) in {time.time() - t_c:.1f} s")
+                        print(f"   Placed it at {dest[0] * 100:.0f}, {dest[1] * 100:+.0f} cm.")
+                        return 0
                 if drop:
                     side.stage = f"{attempt}: putting it down"
                     put_down(arm, gxy, roll, G["grasp_h_m"], open_pct, over_h, tilt)
@@ -1025,7 +1052,15 @@ def main():
         from iro.oakguide import cmd_scout
         return cmd_scout()
     if a and not a[0].startswith("-"):
-        return cmd_pick(a[0], drop="--drop" in a)
+        to = next((x.split("=", 1)[1] for x in a if x.startswith("--to=")), None)
+        if to is not None:
+            try:
+                to = [float(v) / 100 for v in to.split(",")]
+                assert len(to) == 2
+            except (ValueError, AssertionError):
+                print("--to=X,Y in cm from the arm base, e.g. --to=25,-5")
+                return 1
+        return cmd_pick(a[0], drop="--drop" in a, to=to)
     print(__doc__)
     return 1
 
