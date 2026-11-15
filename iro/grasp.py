@@ -421,9 +421,17 @@ def centre(arm, eye, xy, roll, J, target, c, tries=15):
         err = c - target
         if np.linalg.norm(err) < SERVO_TOL_PX:
             break
-        xy = xy + np.clip(-0.7 * Jinv @ err, -0.03, 0.03)
+        step = np.clip(-0.7 * Jinv @ err, -0.03, 0.03)
+        xy = xy + step
         look(arm, xy, roll)
-        f, box, c, _ = eye.find(near=c, radius=150)
+        # search where the step should have moved it: a big step moves it > 150 px (15 Nov: 4 of 7
+        # picks "lost" a tape that was in plain view, 160 px from where it had been)
+        expect = c + J @ step
+        f, box, c, _ = eye.find(near=expect, radius=150)
+        if box is None:
+            f, box, c, _ = eye.find()                   # anywhere in the picture before giving up
+            if box is not None:
+                eye.r.note(f"centring: found {np.linalg.norm(c - expect):.0f} px from where expected")
         if box is None:
             raise RuntimeError("lost the object while centring")
         pc = eye.precise_centre(f, box)
@@ -573,6 +581,8 @@ def cmd_pick(name, drop=False, attempts=3):
                             xy2 = orbit_xy(arm, P, r2, off)
                             look(arm, xy2, r2)
                             got_ = eye.find(near=target, radius=200)
+                            if got_[1] is None:
+                                got_ = eye.find()           # anywhere in the picture (see centre())
                             r.note(f"turned {s * d:+.0f} deg: look ({xy2[0]:.3f}, {xy2[1]:.3f}), "
                                    f"{'seen' if got_[1] is not None else 'NOT seen'}")
                             return r2, xy2, got_
