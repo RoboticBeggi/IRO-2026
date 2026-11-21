@@ -7,7 +7,8 @@ camera calibration).
     iro pick NAME            the OAK-D finds it on the floor, the arm goes straight above it with
                              the jaws turned across it, the wrist camera fine-centres, down, close
                              until contact, lift   (--drop: put it back;  --to=X,Y: carry it to that
-                             spot, cm from the arm base). No OAK-D: searches with the wrist camera.
+                             spot, cm from the arm base; --show: hold it up high and show it around
+                             first). No OAK-D: searches with the wrist camera.
     iro pick calibrate NAME  once (or after the wrist camera was moved): how the wrist picture moves
                              with the gripper, measured on NAME lying still (~20 s)
     iro pick scout           what the OAK-D sees on the floor now
@@ -640,6 +641,53 @@ LIFT_V = 0.12        # m/s top tip speed lifting / carrying a held object
 PLACE_V = 0.06       # m/s top speed setting it down (minimum-jerk: touches down at ~0)
 
 
+SHOW_H = 0.24         # m above the floor: where it holds the object up to show it
+SHOW_LEAN = 40        # deg: the gripper leans outward, so the object faces the people in front
+SHOW_SWEEP = 40       # deg each way the base joint turns while showing
+SHOW_TWIST = 30       # deg the wrist turns the object at each side
+
+
+def show_off(arm, grip, r, roll, xy):
+    """Hold the gripped object up high and show it around: straight up above where it was picked
+    (nothing to hit), forward to a presenting pose leaning SHOW_LEAN outward, then slowly turn left
+    and right, twisting it at each side, and back. Smooth minimum-jerk moves, slower than usual (it
+    carries something). Ends 10 cm above xy again. Returns True if it is still held (squeeze test)."""
+    table = pick_table()
+    arm.move_line([xy[0], xy[1], table + 0.20], speed=LIFT_V, roll=roll, settle=False)
+    present = None
+    for lean in (SHOW_LEAN, 25, 10, 0):           # the most forward-facing pose that is reachable
+        for x in (0.22, 0.20, 0.24):
+            q, err = arm.kin.ik_down([x, 0.0, table + SHOW_H], np.r_[arm.joints()[:4], roll],
+                                     tilt=-np.radians(lean), iters=60)
+            if err < 0.004:
+                present = (q, lean, x)
+                break
+        if present:
+            break
+    if present is None:
+        r.note("show: no presenting pose reachable")
+        return holding(arm, grip, r)[0]
+    q, lean, x = present
+    r.note(f"show: presenting at {x * 100:.0f} cm, {SHOW_H * 100:.0f} cm up, leaning {lean} deg")
+    arm.move_joints(q, duration=1.6)
+    lo, hi = arm.kin.limits[0]
+    rlo, rhi = arm.kin.limits[4]
+    for side in (1, -1):
+        qs = q.copy()
+        qs[0] = float(np.clip(q[0] + side * np.radians(SHOW_SWEEP), lo + 0.05, hi - 0.05))
+        arm.move_joints(qs, duration=1.8)
+        for tw in (1, -1, 0):                     # turn it in the hand: one side, the other, back
+            qt = qs.copy()
+            qt[4] = float(np.clip(qs[4] + tw * np.radians(SHOW_TWIST), rlo + 0.05, rhi - 0.05))
+            arm.move_joints(qt, duration=0.9, settle=False)
+        time.sleep(0.3)
+    arm.move_joints(q, duration=1.6)
+    held, mm = holding(arm, grip, r)
+    r.note(f"show: {'still holding it' if held else 'NOT holding it any more'} (squeeze {mm:.0f} mm)")
+    look(arm, xy, roll, h=0.10, settle=False)    # back above where it came from
+    return held
+
+
 def pick_table():
     from iro.pick import pick_config
     return pick_config()["table_z"]
@@ -754,7 +802,7 @@ def find_from(arm, eye, starts, roll):
     return None
 
 
-def cmd_pick(name, drop=False, attempts=3, to=None):
+def cmd_pick(name, drop=False, attempts=3, to=None, show=False):
     """Find, centre, turn, open, descend feeling for blockages, close until contact, lift, check.
     A miss is looked at again (did it move?) and retried, up to `attempts` times."""
     from iro.measure import close_on, max_open_m, pct_for, set_gripper
@@ -1027,6 +1075,14 @@ def cmd_pick(name, drop=False, attempts=3, to=None):
                         pass
                 r.note(f"whole pick: {time.time() - t_start:.1f} s")
                 r.note(f"picked on try {attempt}: width {grip['width_mm']:.1f} mm at ({gxy[0]:.3f}, {gxy[1]:.3f})")
+                if show:
+                    side.stage = f"{attempt}: showing it"
+                    print(f"7. Showing the {name} around.")
+                    if not show_off(arm, grip, r, roll, gxy):
+                        print("   It slipped out while showing it.")
+                        set_gripper(arm, open_pct)
+                        return 1
+                    print("   Still holding it.")
                 if to is not None:
                     dest = np.asarray(to, float)
                     plan2 = plan_reach(arm, dest, roll, G["grasp_h_m"])
@@ -1079,7 +1135,7 @@ def main():
             except (ValueError, AssertionError):
                 print("--to=X,Y in cm from the arm base, e.g. --to=25,-5")
                 return 1
-        return cmd_pick(a[0], drop="--drop" in a, to=to)
+        return cmd_pick(a[0], drop="--drop" in a, to=to, show="--show" in a)
     print(__doc__)
     return 1
 

@@ -479,6 +479,7 @@ python3-pandas
 python3-pexpect
 python3-pip
 python3-scipy
+python3-smbus
 python3-tk
 python3-urwid
 python-is-python3
