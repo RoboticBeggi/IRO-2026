@@ -1,0 +1,11 @@
+# Written by `iro base calibrate` (lidar-measured; see iro/base.py). speed = gain * (power - dead)
+cnt_w: 1694.5
+cnt_x: 4649.0
+cnt_y: 5213.7
+dead_w: 8.5
+dead_x: 8.1
+dead_y: 10.1
+gain_w: 0.01506
+gain_x: 0.00596
+gain_y: 0.00499
+lidar_yaw_deg: 176.9
