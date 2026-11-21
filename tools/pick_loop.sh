@@ -6,7 +6,7 @@
 set -uo pipefail
 NAME=${1:?usage: tools/pick_loop.sh NAME X,Y [X,Y ...]}; shift
 for dest in "$@"; do
-    "$(dirname "$0")/iro" pick "$NAME" --to="$dest" 2>&1 | grep -v "median filter\|Live feed\|Recorded:" | sed 's/^/    /'
+    "$(dirname "$(readlink -f "$0")")/iro" pick "$NAME" --to="$dest" 2>&1 | grep -v "median filter\|Live feed\|Recorded:" | sed 's/^/    /'
     run=$(ls -td ~/iro-runs/*pick-"$NAME" | head -1)
     ev="$run/events.txt"
     ok=$(grep -c "picked on try" "$ev")
