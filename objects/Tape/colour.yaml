@@ -1,0 +1,8 @@
+# The tape's colour in the OAK-D colour picture (OpenCV HSV, hue 0-180). Measured 21 Nov 2026 from
+# 14 OAK-D pictures of 15 Nov picks (scout boxes): 24-86 % of the inner box pixels in this range,
+# other things the scout boxed 0-3 %. Used by iro.approach.FarEye to reject look-alikes
+# (the recogniser called a red battery pack, a keyboard and cables "Tape" at +0.18).
+hue: [27, 38]
+s_min: 110
+v_min: 90
+frac_min: 0.20

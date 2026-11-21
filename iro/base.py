@@ -285,13 +285,26 @@ def move_by_lidar(b, lo, dx, dy, dth=0.0, v=0.07, w=0.35, tol=0.008, tol_th=math
     return x, y, th
 
 
+def start_lidar():
+    """The lidar driver (iro.visitors.Lidar). The RPLidar S2 often latches "internal error" when its
+    driver was stopped (21 Nov: 2 of 3 restarts): then reset it (0xA5 0x40) and try once more."""
+    from iro.visitors import Lidar
+    try:
+        return Lidar()
+    except RuntimeError:
+        from iro.hw.rplidar import reset
+        lc = load_config()["devices"]["lidar"]
+        reset(lc.get("port", "/dev/rplidar"), lc.get("baud", 1000000))
+        time.sleep(2.0)
+        return Lidar()
+
+
 class LidarPoints:
     """Lidar scans as 2D points (metres) in the ROBOT's frame (x forward), using lidar_yaw_deg."""
 
     def __init__(self, lidar=None):
         if lidar is None:
-            from iro.visitors import Lidar
-            lidar = Lidar()
+            lidar = start_lidar()
         self.li, self.n = lidar, None
         y = settings().get("lidar_yaw_deg")
         self.yaw = math.radians(y if y is not None else 0.0)

@@ -75,6 +75,8 @@ DEVICES
   iro hw snapshot         save every component's stored settings to backup/
   iro prizm ping         is the PRIZM Pro motor program answering? (press green START first)
   iro base ping|calibrate|nudge DX DY [DEG]   the mecanum base (cm / degrees; see iro/base.py)
+  iro approach NAME [--pick] [--show]   drive up to NAME (OAK-D finds it), then pick / show it
+  iro approach range NAME  how well the OAK-D sees NAME with distance (backs away step by step)
   iro prizm backup       copy the PRIZM Pro's whole flash into backup/esp32s3/
   iro prizm restore FILE put a saved flash image back
 
@@ -153,7 +155,8 @@ d=load_config()['devices']['lidar']; print(rplidar.reset(d['port'], d['baud']))"
     hw) [ "${1:-snapshot}" = snapshot ] || die "usage: iro hw snapshot"; exec python -m iro.hwsnap ;;
 
     prizm) exec python -m iro.prizm "$@" ;;
-    base) exec python -u -m iro.base "$@" ;;
+    base) ros_env; exec python -u -m iro.base "$@" ;;
+    approach) ros_env; exec python -u -m iro.approach "$@" ;;
 
     backup)
         case "${1:-now}" in
